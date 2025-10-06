@@ -323,8 +323,8 @@ fn update_image_display(
                         DisplayedImage,
                         Hovered::default(),
                         Node {
-                            width: Val::Px(280.0),
-                            height: Val::Px(180.0),
+                            width: Val::Percent(90.0), // Use 90% of window width
+                            height: Val::Auto, // Auto height to maintain aspect ratio
                             margin: UiRect::all(Val::Px(10.0)),
                             ..default()
                         },
@@ -346,7 +346,7 @@ fn magnifier_system(
     mut commands: Commands,
     mut param_set: ParamSet<(
         Query<(Entity, &mut Node, &mut ImageNode), With<Magnifier>>,
-        Query<&ImageNode, With<DisplayedImage>>,
+        Query<(&ImageNode, &Node), With<DisplayedImage>>,
         Query<(Entity, &mut Node), With<MagnifierRectangle>>,
     )>,
     window_query: Query<&Window>,
@@ -357,22 +357,36 @@ fn magnifier_system(
     let mut is_hovering = false;
     let mut mouse_pos = Vec2::ZERO;
     let mut image_handle: Option<Handle<Image>> = None;
+    let mut actual_image_bounds = Rect::default();
 
     // Check if mouse is hovering over the displayed image area
     if let Some(cursor_pos) = window.cursor_position() {
         mouse_pos = cursor_pos;
 
-        // Calculate if mouse is within the image display area
-        // The UI is centered, display area is 300x200
-        let window_size = Vec2::new(window.width(), window.height());
-        let display_area_size = Vec2::new(300.0, 200.0);
-        let display_area_min = (window_size - display_area_size) / 2.0;
-        let display_area_max = display_area_min + display_area_size;
-
-        if cursor_pos.x >= display_area_min.x && cursor_pos.x <= display_area_max.x &&
-           cursor_pos.y >= display_area_min.y && cursor_pos.y <= display_area_max.y {
-            // Check if there's actually a displayed image and get its handle
-            if let Ok(displayed_image) = param_set.p1().single() {
+        // Get the actual bounds of the displayed image
+        if let Ok((displayed_image, _image_node)) = param_set.p1().single() {
+            // Calculate the actual rendered size and position of the image
+            // Since we're using 90% width with auto height, we need to calculate actual bounds
+            let window_width = window.width();
+            let window_height = window.height();
+            
+            // Image takes 90% of window width
+            let image_width = window_width * 0.9;
+            // Height is auto, so it maintains aspect ratio - we'll use a reasonable estimate
+            // In practice, you'd want to get the actual computed size, but for now we estimate
+            let estimated_image_height = image_width * 0.6; // Assuming roughly 16:10 aspect ratio
+            
+            // Center the image in the window
+            let image_left = (window_width - image_width) / 2.0;
+            let image_top = (window_height - estimated_image_height) / 2.0;
+            let image_right = image_left + image_width;
+            let image_bottom = image_top + estimated_image_height;
+            
+            actual_image_bounds = Rect::new(image_left, image_top, image_right, image_bottom);
+            
+            // Check if mouse is within the actual image bounds
+            if cursor_pos.x >= image_left && cursor_pos.x <= image_right &&
+               cursor_pos.y >= image_top && cursor_pos.y <= image_bottom {
                 is_hovering = true;
                 image_handle = Some(displayed_image.image.clone());
             }
@@ -388,8 +402,8 @@ fn magnifier_system(
                 commands.spawn((
                     Magnifier,
                     Node {
-                        width: Val::Px(150.0),
-                        height: Val::Px(150.0),
+                        width: Val::Px(200.0),
+                        height: Val::Px(200.0),
                         position_type: PositionType::Absolute,
                         left: Val::Px(mouse_pos.x + 20.0),
                         top: Val::Px(mouse_pos.y + 20.0),
@@ -399,10 +413,7 @@ fn magnifier_system(
                     BorderColor::all(Color::BLACK),
                     BorderRadius::all(Val::Px(5.0)),
                     BackgroundColor(Color::WHITE),
-                    ImageNode {
-                        image: image_handle.clone().unwrap(),
-                        ..default()
-                    },
+                    ImageNode::new(image_handle.clone().unwrap()),
                     ZIndex(1000),
                 ));
                 
@@ -433,61 +444,52 @@ fn magnifier_system(
     }
 
     if is_hovering && !param_set.p0().is_empty() {
-        // Calculate image layout once for both magnifier and rectangle
-        let window_size = Vec2::new(window.width(), window.height());
-        let display_area_size = Vec2::new(300.0, 200.0);
-        let image_size = Vec2::new(280.0, 180.0);
-        let display_area_pos = (window_size - display_area_size) / 2.0;
-        let image_left = display_area_pos.x + 10.0; // 10px margin
-        let image_top = display_area_pos.y + 10.0;  // 10px margin
+        // Use the actual image bounds we calculated above
+        let image_left = actual_image_bounds.min.x;
+        let image_top = actual_image_bounds.min.y;
+        let image_width = actual_image_bounds.width();
+        let image_height = actual_image_bounds.height();
         
         // Update magnifier position and UV coordinates
         for (_, mut node, mut image_node) in param_set.p0().iter_mut() {
             // Position magnifier near mouse cursor (offset to avoid covering the cursor)
-            let offset_x = if mouse_pos.x + 170.0 > window.width() { -170.0 } else { 20.0 };
-            let offset_y = if mouse_pos.y + 170.0 > window.height() { -170.0 } else { 20.0 };
+            let offset_x = if mouse_pos.x + 220.0 > window.width() { -220.0 } else { 20.0 };
+            let offset_y = if mouse_pos.y + 220.0 > window.height() { -220.0 } else { 20.0 };
             
             node.left = Val::Px(mouse_pos.x + offset_x);
             node.top = Val::Px(mouse_pos.y + offset_y);
 
-            // Check if mouse is within image bounds
-            if mouse_pos.x >= image_left && mouse_pos.x <= image_left + image_size.x &&
-               mouse_pos.y >= image_top && mouse_pos.y <= image_top + image_size.y {
+            // We already know mouse is within image bounds from the is_hovering check
+            // Mouse position relative to image (0-1 range)
+            let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
+            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
 
-                // Mouse position relative to image (0-1 range)
-                let relative_x = (mouse_pos.x - image_left) / image_size.x;
-                let relative_y = (mouse_pos.y - image_top) / image_size.y;
+            // Define magnification area size (50px x 50px area in the display)
+            let magnify_area_px = 50.0;
+            let uv_width = magnify_area_px / image_width;
+            let uv_height = magnify_area_px / image_height;
 
-                // Define magnification area size (50px x 50px area in the original image)
-                let magnify_area_px = 50.0;
-                let uv_width = magnify_area_px / image_size.x;
-                let uv_height = magnify_area_px / image_size.y;
+            // Center the UV rectangle on the mouse position, allowing edge clamping
+            let uv_center_x = relative_x;
+            let uv_center_y = relative_y;
+            let uv_min_x = (uv_center_x - uv_width / 2.0).max(0.0);
+            let uv_min_y = (uv_center_y - uv_height / 2.0).max(0.0);
+            let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
+            let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
 
-                // Center the UV rectangle on the mouse position
-                let uv_min_x = (relative_x - uv_width / 2.0).clamp(0.0, 1.0 - uv_width);
-                let uv_min_y = (relative_y - uv_height / 2.0).clamp(0.0, 1.0 - uv_height);
-                let uv_max_x = uv_min_x + uv_width;
-                let uv_max_y = uv_min_y + uv_height;
-
-                // Set UV rect for magnification (this crops the image to show only the magnified area)
-                image_node.rect = Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y));
-            }
+            // Set UV rect for magnification - Bevy uses 0,0 at top-left
+            image_node.rect = Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y));
         }
         
         // Update rectangle overlay position
         for (_, mut rect_node) in param_set.p2().iter_mut() {
-            // Check if mouse is within image bounds
-            if mouse_pos.x >= image_left && mouse_pos.x <= image_left + image_size.x &&
-               mouse_pos.y >= image_top && mouse_pos.y <= image_top + image_size.y {
-                
-                // Position rectangle centered on mouse position, but constrained to image bounds
-                let rect_size = 50.0;
-                let rect_left = (mouse_pos.x - rect_size / 2.0).clamp(image_left, image_left + image_size.x - rect_size);
-                let rect_top = (mouse_pos.y - rect_size / 2.0).clamp(image_top, image_top + image_size.y - rect_size);
-                
-                rect_node.left = Val::Px(rect_left);
-                rect_node.top = Val::Px(rect_top);
-            }
+            // Position rectangle centered on mouse position (we already know mouse is within bounds)
+            let rect_size = 50.0;
+            let rect_left = mouse_pos.x - rect_size / 2.0;
+            let rect_top = mouse_pos.y - rect_size / 2.0;
+            
+            rect_node.left = Val::Px(rect_left);
+            rect_node.top = Val::Px(rect_top);
         }
     }
 }
