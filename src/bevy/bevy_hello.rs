@@ -78,6 +78,7 @@ struct Magnifier;
 struct SelectedImage {
     path: Option<PathBuf>,
     handle: Option<Handle<Image>>,
+    dimensions: Option<(u32, u32)>,
     is_loading: bool,
 }
 
@@ -114,24 +115,43 @@ fn demo_root(asset_server: &AssetServer) -> impl Bundle {
         Node {
             width: percent(100),
             height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Stretch,
+            justify_content: JustifyContent::Start,
             display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            row_gap: px(20),
+            flex_direction: FlexDirection::Row,
             ..default()
         },
         TabGroup::default(),
         children![
+            // Left column: Image display (8/10 width)
             (
-                image_select_button(asset_server),
-                observe(|_activate: On<Activate>,
-                        mut dialog_state: ResMut<DialogState>| {
-                    dialog_state.should_open = true;
-                    dialog_state.frame_delay = 1;
-                }),
+                Node {
+                    width: percent(80),
+                    height: percent(100),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                children![image_display_area()],
             ),
-            image_display_area(),
+            // Right column: Button (2/10 width)
+            (
+                Node {
+                    width: percent(20),
+                    height: percent(100),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                children![(
+                    image_select_button(asset_server),
+                    observe(|_activate: On<Activate>,
+                            mut dialog_state: ResMut<DialogState>| {
+                        dialog_state.should_open = true;
+                        dialog_state.frame_delay = 1;
+                    }),
+                )],
+            ),
         ],
     )
 }
@@ -170,8 +190,8 @@ fn image_display_area() -> impl Bundle {
     (
         ImageDisplay,
         Node {
-            width: px(300),
-            height: px(200),
+            width: percent(100),
+            height: percent(100),
             border: UiRect::all(px(2)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
@@ -236,6 +256,7 @@ fn dialog_system(
                 commands.insert_resource(SelectedImage {
                     path: Some(path),
                     handle: None,
+                    dimensions: None,
                     is_loading: false,
                 });
             }
@@ -284,6 +305,7 @@ fn update_image_display(
 
                             let image_handle = images.add(bevy_image);
                             selected_image.handle = Some(image_handle);
+                            selected_image.dimensions = Some((width, height));
                             selected_image.is_loading = false;
 
                             println!("Image loaded successfully: {}x{}", width, height);
@@ -291,6 +313,7 @@ fn update_image_display(
                         Err(e) => {
                             println!("Failed to decode image: {:?}", e);
                             selected_image.handle = None;
+                            selected_image.dimensions = None;
                             selected_image.is_loading = false;
                         }
                     }
@@ -298,11 +321,13 @@ fn update_image_display(
                 Err(e) => {
                     println!("Failed to open image file: {:?}", e);
                     selected_image.handle = None;
+                    selected_image.dimensions = None;
                     selected_image.is_loading = false;
                 }
             }
         } else {
             selected_image.handle = None;
+            selected_image.dimensions = None;
             selected_image.is_loading = false;
         }
     }
@@ -323,9 +348,8 @@ fn update_image_display(
                         DisplayedImage,
                         Hovered::default(),
                         Node {
-                            width: Val::Percent(90.0), // Use 90% of window width
+                            width: Val::Percent(100.0), // Fill the entire container width
                             height: Val::Auto, // Auto height to maintain aspect ratio
-                            margin: UiRect::all(Val::Px(10.0)),
                             ..default()
                         },
                     ));
@@ -350,6 +374,7 @@ fn magnifier_system(
         Query<(Entity, &mut Node), With<MagnifierRectangle>>,
     )>,
     window_query: Query<&Window>,
+    selected_image: Res<SelectedImage>,
     mut last_hover_state: Local<bool>,
 ) {
     let Ok(window) = window_query.single() else { return };
@@ -366,21 +391,32 @@ fn magnifier_system(
         // Get the actual bounds of the displayed image
         if let Ok((displayed_image, _image_node)) = param_set.p1().single() {
             // Calculate the actual rendered size and position of the image
-            // Since we're using 90% width with auto height, we need to calculate actual bounds
+            // Image is now in the left column (80% of window width) and fills 100% of that column
             let window_width = window.width();
             let window_height = window.height();
             
-            // Image takes 90% of window width
-            let image_width = window_width * 0.9;
-            // Height is auto, so it maintains aspect ratio - we'll use a reasonable estimate
-            // In practice, you'd want to get the actual computed size, but for now we estimate
-            let estimated_image_height = image_width * 0.6; // Assuming roughly 16:10 aspect ratio
+            // Left column takes 80% of window width
+            let left_column_width = window_width * 0.8;
             
-            // Center the image in the window
-            let image_left = (window_width - image_width) / 2.0;
-            let image_top = (window_height - estimated_image_height) / 2.0;
+            // Get actual image dimensions if available
+            let (image_width, image_height) = if let Some((img_width, img_height)) = selected_image.dimensions {
+                // Calculate displayed dimensions maintaining aspect ratio
+                let aspect_ratio = img_width as f32 / img_height as f32;
+                let displayed_width = left_column_width;
+                let displayed_height = displayed_width / aspect_ratio;
+                (displayed_width, displayed_height)
+            } else {
+                // Fallback to estimated dimensions if not available
+                let displayed_width = left_column_width;
+                let estimated_height = displayed_width * 0.6; // Assuming roughly 16:10 aspect ratio
+                (displayed_width, estimated_height)
+            };
+            
+            // Image starts at the left edge of the left column
+            let image_left = 0.0;
+            let image_top = (window_height - image_height) / 2.0; // Center vertically
             let image_right = image_left + image_width;
-            let image_bottom = image_top + estimated_image_height;
+            let image_bottom = image_top + image_height;
             
             actual_image_bounds = Rect::new(image_left, image_top, image_right, image_bottom);
             
