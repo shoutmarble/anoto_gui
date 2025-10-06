@@ -6,14 +6,12 @@
 //! matures, so please exercise caution if you are using this as a reference for your own code,
 //! and note that there are still "user experience" issues with this API.
 
-use bevy_shader::ShaderRef;
 use bevy::{
     asset::{AssetPlugin, Handle},
     ecs::system::ParamSet,
     input_focus::tab_navigation::{TabGroup, TabIndex},
     picking::hover::Hovered,
     prelude::*,
-    render::render_resource::AsBindGroup,
     window::{Window, WindowMode, WindowPlugin, WindowPosition, WindowResolution, PresentMode},
 };
 use bevy_ui_widgets::{
@@ -21,24 +19,7 @@ use bevy_ui_widgets::{
     UiWidgetsPlugins,
 };
 use std::path::PathBuf;
-use image::ImageReader;
-
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-struct MagnifierMaterial {
-    #[uniform(0)]
-    uv_min: Vec2,
-    #[uniform(1)]
-    uv_max: Vec2,
-    #[texture(2)]
-    #[sampler(3)]
-    texture: Handle<Image>,
-}
-
-impl UiMaterial for MagnifierMaterial {
-    fn fragment_shader() -> ShaderRef {
-        ShaderRef::Path("shaders/magnifier.wgsl".into())
-    }
-}
+use image::{DynamicImage, GenericImageView, ImageReader};
 
 pub fn bevy_hello() {
     App::new()
@@ -50,7 +31,7 @@ pub fn bevy_hello() {
                 primary_window: Some(Window {
                     title: "Anoto GUI".to_string(),
                     resolution: WindowResolution::new(864, 583),
-                    position: WindowPosition::Automatic, // Changed from Centered to Automatic for better WSL compatibility
+                    position: WindowPosition::At(IVec2::new(100, 50)), // Position 20px higher than typical default
                     mode: WindowMode::Windowed,
                     resizable: false,
                     decorations: true,
@@ -64,8 +45,8 @@ pub fn bevy_hello() {
             UiWidgetsPlugins,
         ))
         .init_resource::<SelectedImage>()
+        .init_resource::<OriginalImage>()
         .init_resource::<DialogState>()
-        .init_asset::<MagnifierMaterial>()
         .add_systems(Startup, (setup, startup_check).chain())
         .add_systems(Update, image_select_system)
         .add_systems(Update, dialog_system)
@@ -89,6 +70,76 @@ struct ImageDisplay;
 #[derive(Component)]
 struct PlaceholderText;
 
+/// Marker for the secondary image display area
+#[derive(Component)]
+struct SecondaryImageDisplay;
+
+/// Marker for placeholder text in secondary area when no image is selected
+#[derive(Component)]
+struct SecondaryPlaceholderText;
+
+/// Marker for displayed images
+#[derive(Component)]
+struct DisplayedImage;
+
+/// Marker for secondary displayed images
+#[derive(Component)]
+struct SecondaryDisplayedImage;
+
+/// Marker for the magnifier rectangle overlay
+#[derive(Component)]
+struct MagnifierRectangle;
+
+fn image_display_area() -> impl Bundle {
+    (
+        ImageDisplay,
+        Node {
+            width: percent(100),
+            height: percent(100),
+            border: UiRect::all(px(2)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
+        BackgroundColor(Color::srgb(0.9, 0.9, 0.9)),
+        children![(
+            PlaceholderText,
+            Text::new("No image selected"),
+            TextFont {
+                font_size: 16.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.5, 0.5, 0.5)),
+        )],
+    )
+}
+
+fn secondary_image_display_area() -> impl Bundle {
+    (
+        SecondaryImageDisplay,
+        Node {
+            width: percent(100),
+            height: percent(100),
+            border: UiRect::all(px(2)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
+        BackgroundColor(Color::srgb(0.9, 0.9, 0.9)),
+        children![(
+            SecondaryPlaceholderText,
+            Text::new("Secondary view"),
+            TextFont {
+                font_size: 14.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.5, 0.5, 0.5)),
+        )],
+    )
+}
+
 /// Marker for the magnifier window
 #[derive(Component)]
 struct Magnifier;
@@ -101,6 +152,10 @@ struct SelectedImage {
     dimensions: Option<(u32, u32)>,
     is_loading: bool,
 }
+
+/// Resource to store the original image buffer
+#[derive(Resource, Default)]
+struct OriginalImage(Option<DynamicImage>);
 
 /// Resource to track dialog state
 #[derive(Resource, Default)]
@@ -154,23 +209,47 @@ fn demo_root(asset_server: &AssetServer) -> impl Bundle {
                 },
                 children![image_display_area()],
             ),
-            // Right column: Button (2/10 width)
+            // Right column: Button and secondary image display (2/10 width)
             (
                 Node {
                     width: percent(20),
                     height: percent(100),
-                    justify_content: JustifyContent::Center,
+                    justify_content: JustifyContent::Start,
                     align_items: AlignItems::Center,
+                    flex_direction: FlexDirection::Column,
                     ..default()
                 },
-                children![(
-                    image_select_button(asset_server),
-                    observe(|_activate: On<Activate>,
-                            mut dialog_state: ResMut<DialogState>| {
-                        dialog_state.should_open = true;
-                        dialog_state.frame_delay = 1;
-                    }),
-                )],
+                children![
+                    // Load image button at the top
+                    (
+                        Node {
+                            width: percent(100),
+                            height: px(80), // Fixed height for button area
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        children![(
+                            image_select_button(asset_server),
+                            observe(|_activate: On<Activate>,
+                                    mut dialog_state: ResMut<DialogState>| {
+                                dialog_state.should_open = true;
+                                dialog_state.frame_delay = 1;
+                            }),
+                        )],
+                    ),
+                    // Secondary image display area below the button
+                    (
+                        Node {
+                            width: percent(100),
+                            height: percent(100), // Take remaining space
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        children![secondary_image_display_area()],
+                    ),
+                ],
             ),
         ],
     )
@@ -202,31 +281,6 @@ fn image_select_button(_asset_server: &AssetServer) -> impl Bundle {
             },
             TextColor(Color::srgb(0.9, 0.9, 0.9)),
             TextShadow::default(),
-        )],
-    )
-}
-
-fn image_display_area() -> impl Bundle {
-    (
-        ImageDisplay,
-        Node {
-            width: percent(100),
-            height: percent(100),
-            border: UiRect::all(px(2)),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
-        BackgroundColor(Color::srgb(0.9, 0.9, 0.9)),
-        children![(
-            PlaceholderText,
-            Text::new("No image selected"),
-            TextFont {
-                font_size: 16.0,
-                ..default()
-            },
-            TextColor(Color::srgb(0.5, 0.5, 0.5)),
         )],
     )
 }
@@ -289,8 +343,11 @@ fn update_image_display(
     mut selected_image: ResMut<SelectedImage>,
     mut last_path: Local<Option<PathBuf>>,
     image_display_query: Query<Entity, With<ImageDisplay>>,
+    secondary_image_display_query: Query<Entity, With<SecondaryImageDisplay>>,
     displayed_images: Query<Entity, With<DisplayedImage>>,
+    secondary_displayed_images: Query<Entity, With<SecondaryDisplayedImage>>,
     placeholder_text: Query<Entity, With<PlaceholderText>>,
+    secondary_placeholder_text: Query<Entity, With<SecondaryPlaceholderText>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if selected_image.path != *last_path && !selected_image.is_loading {
@@ -298,6 +355,9 @@ fn update_image_display(
 
         // Remove old displayed images and placeholder text
         for entity in displayed_images.iter() {
+            commands.entity(entity).despawn();
+        }
+        for entity in secondary_displayed_images.iter() {
             commands.entity(entity).despawn();
         }
 
@@ -308,6 +368,7 @@ fn update_image_display(
                 Ok(reader) => {
                     match reader.decode() {
                         Ok(img) => {
+                            commands.insert_resource(OriginalImage(Some(img.clone())));
                             let rgba_img = img.to_rgba8();
                             let (width, height) = rgba_img.dimensions();
 
@@ -332,6 +393,7 @@ fn update_image_display(
                         }
                         Err(e) => {
                             println!("Failed to decode image: {:?}", e);
+                            commands.insert_resource(OriginalImage(None));
                             selected_image.handle = None;
                             selected_image.dimensions = None;
                             selected_image.is_loading = false;
@@ -340,12 +402,14 @@ fn update_image_display(
                 }
                 Err(e) => {
                     println!("Failed to open image file: {:?}", e);
+                    commands.insert_resource(OriginalImage(None));
                     selected_image.handle = None;
                     selected_image.dimensions = None;
                     selected_image.is_loading = false;
                 }
             }
         } else {
+            commands.insert_resource(OriginalImage(None));
             selected_image.handle = None;
             selected_image.dimensions = None;
             selected_image.is_loading = false;
@@ -358,6 +422,9 @@ fn update_image_display(
 
             // Remove placeholder text
             for text_entity in placeholder_text.iter() {
+                commands.entity(text_entity).despawn();
+            }
+            for text_entity in secondary_placeholder_text.iter() {
                 commands.entity(text_entity).despawn();
             }
 
@@ -376,26 +443,37 @@ fn update_image_display(
                 });
             }
 
+            for container_entity in secondary_image_display_query.iter() {
+                commands.entity(container_entity).with_children(|parent| {
+                    parent.spawn((
+                        ImageNode::new(handle.clone()),
+                        SecondaryDisplayedImage,
+                        Hovered::default(),
+                        Node {
+                            width: Val::Percent(100.0), // Fill the entire container width
+                            height: Val::Auto, // Auto height to maintain aspect ratio
+                            ..default()
+                        },
+                    ));
+                });
+            }
+
             selected_image.handle = None;
         }
 }
 
-#[derive(Component)]
-struct DisplayedImage;
-
-#[derive(Component)]
-struct MagnifierRectangle;
-
 fn magnifier_system(
     mut commands: Commands,
     mut param_set: ParamSet<(
-        Query<(Entity, &mut Node, &mut MaterialNode<MagnifierMaterial>), With<Magnifier>>,
+        Query<(Entity, &mut Node, &mut ImageNode), With<Magnifier>>,
         Query<(&ImageNode, &Node), With<DisplayedImage>>,
         Query<(Entity, &mut Node), With<MagnifierRectangle>>,
+        Query<&mut ImageNode, With<SecondaryDisplayedImage>>,
     )>,
     window_query: Query<&Window>,
     selected_image: Res<SelectedImage>,
-    mut materials: ResMut<Assets<MagnifierMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    original_image: Res<OriginalImage>,
 ) {
     let Ok(window) = window_query.single() else { return };
 
@@ -404,47 +482,92 @@ fn magnifier_system(
     let mut image_handle: Option<Handle<Image>> = None;
     let mut actual_image_bounds = Rect::default();
 
-    // Check if mouse is hovering over the displayed image area
+    // Check if mouse is hovering over either displayed image area
     if let Some(cursor_pos) = window.cursor_position() {
         mouse_pos = cursor_pos;
 
-        // Get the actual bounds of the displayed image
-        if let Ok((displayed_image, _image_node)) = param_set.p1().single() {
-            // Calculate the actual rendered size and position of the image
-            // Image is now in the left column (80% of window width) and fills 100% of that column
-            let window_width = window.width();
-            let window_height = window.height();
-            
-            // Left column takes 80% of window width
-            let left_column_width = window_width * 0.8;
-            
-            // Get actual image dimensions if available
-            let (image_width, image_height) = if let Some((img_width, img_height)) = selected_image.dimensions {
-                // Calculate displayed dimensions maintaining aspect ratio
-                let aspect_ratio = img_width as f32 / img_height as f32;
-                let displayed_width = left_column_width;
-                let displayed_height = displayed_width / aspect_ratio;
-                (displayed_width, displayed_height)
-            } else {
-                // Fallback to estimated dimensions if not available
-                let displayed_width = left_column_width;
-                let estimated_height = displayed_width * 0.6; // Assuming roughly 16:10 aspect ratio
-                (displayed_width, estimated_height)
-            };
-            
-            // Image starts at the left edge of the left column
-            let image_left = 0.0;
-            let image_top = (window_height - image_height) / 2.0; // Center vertically
-            let image_right = image_left + image_width;
-            let image_bottom = image_top + image_height;
-            
-            actual_image_bounds = Rect::new(image_left, image_top, image_right, image_bottom);
-            
-            // Check if mouse is within the actual image bounds
-            if cursor_pos.x >= image_left && cursor_pos.x <= image_right &&
-               cursor_pos.y >= image_top && cursor_pos.y <= image_bottom {
-                is_hovering = true;
+        let window_width = window.width();
+        let window_height = window.height();
+
+        // Check main image area (left column, 80% width)
+        let left_column_width = window_width * 0.8;
+        let (main_image_width, main_image_height) = if let Some((img_width, img_height)) = selected_image.dimensions {
+            let aspect_ratio = img_width as f32 / img_height as f32;
+            let displayed_width = left_column_width;
+            let displayed_height = displayed_width / aspect_ratio;
+            (displayed_width, displayed_height)
+        } else {
+            let displayed_width = left_column_width;
+            let estimated_height = displayed_width * 0.6;
+            (displayed_width, estimated_height)
+        };
+
+        let main_image_left = 0.0;
+        let main_image_top = (window_height - main_image_height) / 2.0;
+        let main_image_right = main_image_left + main_image_width;
+        let main_image_bottom = main_image_top + main_image_height;
+
+        // Check secondary image area (right column, 20% width)
+        let right_column_start = window_width * 0.8;
+        let right_column_width = window_width * 0.2;
+        let (secondary_image_width, secondary_image_height) = if let Some((img_width, img_height)) = selected_image.dimensions {
+            let aspect_ratio = img_width as f32 / img_height as f32;
+            let displayed_width = right_column_width;
+            let displayed_height = displayed_width / aspect_ratio;
+            (displayed_width, displayed_height)
+        } else {
+            let displayed_width = right_column_width;
+            let estimated_height = displayed_width * 0.6;
+            (displayed_width, estimated_height)
+        };
+
+        let secondary_image_left = right_column_start;
+        let secondary_image_top = (window_height - secondary_image_height) / 2.0;
+        let secondary_image_right = secondary_image_left + secondary_image_width;
+        let secondary_image_bottom = secondary_image_top + secondary_image_height;
+
+        // Check which area the mouse is over
+        if cursor_pos.x >= main_image_left && cursor_pos.x <= main_image_right &&
+           cursor_pos.y >= main_image_top && cursor_pos.y <= main_image_bottom {
+            is_hovering = true;
+            actual_image_bounds = Rect::new(main_image_left, main_image_top, main_image_right, main_image_bottom);
+            // Get image handle from any displayed image
+            if let Some((displayed_image, _)) = param_set.p1().iter().next() {
                 image_handle = Some(displayed_image.image.clone());
+            }
+        } else if cursor_pos.x >= secondary_image_left && cursor_pos.x <= secondary_image_right &&
+                  cursor_pos.y >= secondary_image_top && cursor_pos.y <= secondary_image_bottom {
+            is_hovering = true;
+            actual_image_bounds = Rect::new(secondary_image_left, secondary_image_top, secondary_image_right, secondary_image_bottom);
+            // Get image handle from any displayed image
+            if let Some((displayed_image, _)) = param_set.p1().iter().next() {
+                image_handle = Some(displayed_image.image.clone());
+            }
+        }
+
+        // Update secondary image display with magnified content if hovering over main image
+        if cursor_pos.x >= main_image_left && cursor_pos.x <= main_image_right &&
+           cursor_pos.y >= main_image_top && cursor_pos.y <= main_image_bottom {
+            let relative_x = ((mouse_pos.x - main_image_left) / main_image_width).clamp(0.0, 1.0);
+            let relative_y = 1.0 - ((mouse_pos.y - main_image_top) / main_image_height).clamp(0.0, 1.0);
+
+            let magnify_area_px = 100.0;
+            let uv_width = magnify_area_px / main_image_width;
+            let uv_height = magnify_area_px / main_image_height;
+
+            let uv_center_x = relative_x;
+            let uv_center_y = relative_y;
+            let uv_min_x = (uv_center_x - uv_width / 2.0).max(0.0);
+            let uv_min_y = (uv_center_y - uv_height / 2.0).max(0.0);
+            let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
+            let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
+
+            // Update secondary image display
+            for mut secondary_image_node in param_set.p3().iter_mut() {
+                secondary_image_node.rect = Some(Rect {
+                    min: Vec2::new(uv_min_x, uv_min_y),
+                    max: Vec2::new(uv_max_x, uv_max_y),
+                });
             }
         }
     }
@@ -458,9 +581,9 @@ fn magnifier_system(
             let image_height = actual_image_bounds.height();
             
             let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
-            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
-            
-            let magnify_area_px = 50.0;
+            let relative_y = 1.0 - ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0); // Flip Y coordinate for UV
+
+            let magnify_area_px = 100.0; // Crop 100x100 area for 1:1 display in 100x100 popup
             let uv_width = magnify_area_px / image_width;
             let uv_height = magnify_area_px / image_height;
             
@@ -470,41 +593,62 @@ fn magnifier_system(
             let uv_min_y = (uv_center_y - uv_height / 2.0).max(0.0);
             let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
             let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
+
+            // Debug output for magnifier creation
+            println!("Creating magnifier - UV coords: min=({:.3}, {:.3}) max=({:.3}, {:.3})", uv_min_x, uv_min_y, uv_max_x, uv_max_y);
             
-            let magnifier_material = MagnifierMaterial {
-                uv_min: Vec2::new(uv_min_x, uv_min_y),
-                uv_max: Vec2::new(uv_max_x, uv_max_y),
-                texture: image_handle.clone().unwrap(),
-            };
-            
-            let material_handle = materials.add(magnifier_material);
-            
-            commands.spawn((
-                Magnifier,
-                Node {
-                    width: Val::Px(200.0),
-                    height: Val::Px(200.0),
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(mouse_pos.x + 20.0),
-                    top: Val::Px(mouse_pos.y + 20.0),
-                    border: UiRect::all(Val::Px(2.0)),
-                    ..default()
-                },
-                BorderColor::all(Color::BLACK),
-                BorderRadius::all(Val::Px(5.0)),
-                MaterialNode(material_handle),
-            ));
+            if let Some(ref img) = original_image.0 {
+                let img_width_f = img.width() as f32;
+                let img_height_f = img.height() as f32;
+                let pixel_x = relative_x * img_width_f;
+                let pixel_y = relative_y * img_height_f;
+                let half_crop = magnify_area_px / 2.0;
+                let start_x = (pixel_x - half_crop).max(0.0) as u32;
+                let start_y = (pixel_y - half_crop).max(0.0) as u32;
+                let crop_w = ((start_x + magnify_area_px as u32).min(img.width()) - start_x).max(1);
+                let crop_h = ((start_y + magnify_area_px as u32).min(img.height()) - start_y).max(1);
+                let cropped = img.view(start_x, start_y, crop_w, crop_h).to_image();
+                let rgba_cropped = cropped.into_raw();
+                let bevy_cropped = Image::new(
+                    bevy::render::render_resource::Extent3d {
+                        width: crop_w,
+                        height: crop_h,
+                        depth_or_array_layers: 1,
+                    },
+                    bevy::render::render_resource::TextureDimension::D2,
+                    rgba_cropped,
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                    Default::default(),
+                );
+                let cropped_handle = images.add(bevy_cropped);
+                
+                commands.spawn((
+                    Magnifier,
+                    Node {
+                        width: Val::Px(100.0),
+                        height: Val::Px(100.0),
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(mouse_pos.x + 20.0),
+                        top: Val::Px(mouse_pos.y + 20.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::BLACK),
+                    ZIndex(1000), // Ensure magnifier appears on top
+                    ImageNode::new(cropped_handle),
+                ));
+            }
             
             // Create rectangle overlay on the original image
-            let rect_size = 50.0;
+            let rect_size = 100.0; // Match the cropped area size
             let rect_left = mouse_pos.x - rect_size / 2.0;
             let rect_top = mouse_pos.y - rect_size / 2.0;
             
             commands.spawn((
                 MagnifierRectangle,
                 Node {
-                    width: Val::Px(50.0),
-                    height: Val::Px(50.0),
+                    width: Val::Px(100.0),
+                    height: Val::Px(100.0),
                     position_type: PositionType::Absolute,
                     left: Val::Px(rect_left),
                     top: Val::Px(rect_top),
@@ -525,9 +669,68 @@ fn magnifier_system(
             
             // Calculate new UV rect
             let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
-            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
+            let relative_y = 1.0 - ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0); // Flip Y coordinate for UV
 
-            let magnify_area_px = 50.0;
+            let magnify_area_px = 100.0; // Crop 100x100 area for 1:1 display in 100x100 popup
+            let uv_width = magnify_area_px / image_width;
+            let uv_height = magnify_area_px / image_height;
+
+            // Calculate pixel coordinates for cropping
+            if let Some(ref img) = original_image.0 {
+                let img_width_f = img.width() as f32;
+                let img_height_f = img.height() as f32;
+                let pixel_x = relative_x * img_width_f;
+                let pixel_y = relative_y * img_height_f;
+                let half_crop = magnify_area_px / 2.0;
+                let start_x = (pixel_x - half_crop).max(0.0) as u32;
+                let start_y = (pixel_y - half_crop).max(0.0) as u32;
+                let crop_w = ((start_x + magnify_area_px as u32).min(img.width()) - start_x).max(1);
+                let crop_h = ((start_y + magnify_area_px as u32).min(img.height()) - start_y).max(1);
+                let cropped = img.view(start_x, start_y, crop_w, crop_h).to_image();
+                let rgba_cropped = cropped.into_raw();
+                let bevy_cropped = Image::new(
+                    bevy::render::render_resource::Extent3d {
+                        width: crop_w,
+                        height: crop_h,
+                        depth_or_array_layers: 1,
+                    },
+                    bevy::render::render_resource::TextureDimension::D2,
+                    rgba_cropped,
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                    Default::default(),
+                );
+                let cropped_handle = images.add(bevy_cropped);
+                
+                // Update existing magnifier
+                for (_entity, mut node, mut image_node) in param_set.p0().iter_mut() {
+                    image_node.image = cropped_handle.clone();
+                    image_node.rect = None;
+                    
+                    // Position magnifier near mouse cursor (offset to avoid covering the cursor)
+                    let offset_x = if mouse_pos.x + 120.0 > window.width() { -120.0 } else { 20.0 };
+                    let offset_y = if mouse_pos.y + 120.0 > window.height() { -120.0 } else { 20.0 };
+                    
+                    node.left = Val::Px(mouse_pos.x + offset_x);
+                    node.top = Val::Px(mouse_pos.y + offset_y);
+                }
+            }
+            
+            // Update rectangle overlay position
+            for (_, mut rect_node) in param_set.p2().iter_mut() {
+                // Position rectangle centered on mouse position (we already know mouse is within bounds)
+                let rect_size = 100.0; // Match the cropped area size
+                let rect_left = mouse_pos.x - rect_size / 2.0;
+                let rect_top = mouse_pos.y - rect_size / 2.0;
+                
+                rect_node.left = Val::Px(rect_left);
+                rect_node.top = Val::Px(rect_top);
+            }
+
+            // Update secondary image display with magnified content
+            let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
+            let relative_y = 1.0 - ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
+
+            let magnify_area_px = 100.0;
             let uv_width = magnify_area_px / image_width;
             let uv_height = magnify_area_px / image_height;
 
@@ -537,34 +740,13 @@ fn magnifier_system(
             let uv_min_y = (uv_center_y - uv_height / 2.0).max(0.0);
             let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
             let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
-            
-            let _new_rect = Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y);
-            
-            // Update existing magnifier material and position
-            for (_entity, mut node, material_node) in param_set.p0().iter_mut() {
-                // Update material properties
-                if let Some(material) = materials.get_mut(&material_node.0) {
-                    material.uv_min = Vec2::new(uv_min_x, uv_min_y);
-                    material.uv_max = Vec2::new(uv_max_x, uv_max_y);
-                }
-                
-                // Position magnifier near mouse cursor (offset to avoid covering the cursor)
-                let offset_x = if mouse_pos.x + 220.0 > window.width() { -220.0 } else { 20.0 };
-                let offset_y = if mouse_pos.y + 220.0 > window.height() { -220.0 } else { 20.0 };
-                
-                node.left = Val::Px(mouse_pos.x + offset_x);
-                node.top = Val::Px(mouse_pos.y + offset_y);
-            }
-            
-            // Update rectangle overlay position
-            for (_, mut rect_node) in param_set.p2().iter_mut() {
-                // Position rectangle centered on mouse position (we already know mouse is within bounds)
-                let rect_size = 50.0;
-                let rect_left = mouse_pos.x - rect_size / 2.0;
-                let rect_top = mouse_pos.y - rect_size / 2.0;
-                
-                rect_node.left = Val::Px(rect_left);
-                rect_node.top = Val::Px(rect_top);
+
+            // Update secondary image display
+            for mut secondary_image_node in param_set.p3().iter_mut() {
+                secondary_image_node.rect = Some(Rect {
+                    min: Vec2::new(uv_min_x, uv_min_y),
+                    max: Vec2::new(uv_max_x, uv_max_y),
+                });
             }
         }
     } else {
@@ -574,6 +756,11 @@ fn magnifier_system(
         }
         for (entity, _) in param_set.p2().iter() {
             commands.entity(entity).despawn();
+        }
+
+        // Reset secondary image display to show full image
+        for mut secondary_image_node in param_set.p3().iter_mut() {
+            secondary_image_node.rect = None; // None means show full image
         }
     }
 }
