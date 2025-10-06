@@ -7,9 +7,11 @@
 //! and note that there are still "user experience" issues with this API.
 
 use bevy::{
+    asset::AssetPlugin,
     input_focus::tab_navigation::{TabGroup, TabIndex},
     picking::hover::Hovered,
     prelude::*,
+    window::{Window, WindowMode, WindowPlugin, WindowPosition, WindowResolution, MonitorSelection, PresentMode},
 };
 use bevy_ui_widgets::{
     observe, Activate, Button,
@@ -21,18 +23,36 @@ use image::ImageReader;
 pub fn bevy_hello() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(AssetPlugin {
+                file_path: "../../assets".to_string(),
+                ..default()
+            }).set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Anoto GUI".to_string(),
+                    resolution: WindowResolution::new(864, 583),
+                    position: WindowPosition::Automatic, // Changed from Centered to Automatic for better WSL compatibility
+                    mode: WindowMode::Windowed,
+                    resizable: false,
+                    decorations: true,
+                    transparent: false,
+                    visible: true,
+                    present_mode: PresentMode::AutoNoVsync, // Changed to NoVsync for better stability in software rendering
+                    ..default()
+                }),
+                ..default()
+            }),
             UiWidgetsPlugins,
         ))
         .init_resource::<SelectedImage>()
         .init_resource::<DialogState>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, startup_check).chain())
         .add_systems(
             Update,
             (
                 image_select_system,
                 dialog_system,
                 update_image_display,
+                magnifier_system,
             ),
         )
         .run();
@@ -53,6 +73,10 @@ struct ImageDisplay;
 #[derive(Component)]
 struct PlaceholderText;
 
+/// Marker for the magnifier window
+#[derive(Component)]
+struct Magnifier;
+
 /// Resource to track the selected image
 #[derive(Resource, Default)]
 struct SelectedImage {
@@ -72,6 +96,21 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>) {
     // ui camera
     commands.spawn(Camera2d);
     commands.spawn(demo_root(&assets));
+}
+
+fn startup_check(
+    windows: Query<&Window>,
+    asset_server: Res<AssetServer>,
+) {
+    // Check if window was created successfully
+    if let Ok(window) = windows.single() {
+        println!("Window created successfully: {}x{}", window.width(), window.height());
+    } else {
+        println!("Warning: Window creation status uncertain");
+    }
+
+    // Note: Asset loading will be handled by the UI system when needed
+    println!("Bevy application startup completed successfully");
 }
 
 fn demo_root(asset_server: &AssetServer) -> impl Bundle {
@@ -121,7 +160,7 @@ fn image_select_button(asset_server: &AssetServer) -> impl Bundle {
         children![(
             Text::new("Load Image"),
             TextFont {
-                font: asset_server.load("fonts/icons.ttf"),
+                font: default(),
                 font_size: 22.0,
                 ..default()
             },
@@ -285,6 +324,7 @@ fn update_image_display(
                     parent.spawn((
                         ImageNode::new(handle.clone()),
                         DisplayedImage,
+                        Hovered::default(),
                         Node {
                             width: Val::Px(280.0),
                             height: Val::Px(180.0),
@@ -302,3 +342,111 @@ fn update_image_display(
 
 #[derive(Component)]
 struct DisplayedImage;
+
+fn magnifier_system(
+    mut commands: Commands,
+    mut magnifier_query: Query<(Entity, &mut Node, &mut ImageNode), With<Magnifier>>,
+    displayed_image_query: Query<(), With<DisplayedImage>>,
+    window_query: Query<&Window>,
+    selected_image: Res<SelectedImage>,
+    mut last_hover_state: Local<bool>,
+) {
+    let Ok(window) = window_query.single() else { return };
+
+    let mut is_hovering = false;
+    let mut mouse_pos = Vec2::ZERO;
+
+    // Check if mouse is hovering over the displayed image area
+    if let Some(cursor_pos) = window.cursor_position() {
+        mouse_pos = cursor_pos;
+
+        // Calculate if mouse is within the image display area
+        // The UI is centered, display area is 300x200
+        let window_size = Vec2::new(window.width(), window.height());
+        let display_area_size = Vec2::new(300.0, 200.0);
+        let display_area_min = (window_size - display_area_size) / 2.0;
+        let display_area_max = display_area_min + display_area_size;
+
+        if cursor_pos.x >= display_area_min.x && cursor_pos.x <= display_area_max.x &&
+           cursor_pos.y >= display_area_min.y && cursor_pos.y <= display_area_max.y {
+            // Check if there's actually a displayed image
+            if !displayed_image_query.is_empty() {
+                is_hovering = true;
+            }
+        }
+    }
+
+    if is_hovering != *last_hover_state {
+        *last_hover_state = is_hovering;
+
+        if is_hovering {
+            // Create magnifier if it doesn't exist and we have an image
+            if magnifier_query.is_empty() && selected_image.handle.is_some() {
+                commands.spawn((
+                    Magnifier,
+                    Node {
+                        width: Val::Px(200.0),
+                        height: Val::Px(200.0),
+                        position_type: PositionType::Absolute,
+                        ..default()
+                    },
+                    BorderColor::all(Color::BLACK),
+                    BorderRadius::all(Val::Px(5.0)),
+                    BackgroundColor(Color::WHITE),
+                    ImageNode {
+                        image: selected_image.handle.clone().unwrap(),
+                        ..default()
+                    },
+                    ZIndex(10),
+                ));
+            }
+        } else {
+            // Remove magnifier when not hovering
+            for (entity, _, _) in magnifier_query.iter() {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+
+    if is_hovering && selected_image.handle.is_some() {
+        // Update magnifier position and UV coordinates
+        for (_, mut node, mut image_node) in magnifier_query.iter_mut() {
+            // Position magnifier near mouse cursor (offset to avoid covering the cursor)
+            node.left = Val::Px(mouse_pos.x + 20.0);
+            node.top = Val::Px(mouse_pos.y + 20.0);
+
+            // Calculate UV coordinates for the magnified area
+            // The displayed image is positioned within the UI layout
+            let window_size = Vec2::new(window.width(), window.height());
+            let display_area_size = Vec2::new(300.0, 200.0);
+            let image_size = Vec2::new(280.0, 180.0);
+
+            // Calculate image position (centered in window)
+            let display_area_pos = (window_size - display_area_size) / 2.0;
+            let image_left = display_area_pos.x + 10.0; // 10px margin
+            let image_top = display_area_pos.y + 10.0;  // 10px margin
+
+            // Check if mouse is within image bounds
+            if mouse_pos.x >= image_left && mouse_pos.x <= image_left + image_size.x &&
+               mouse_pos.y >= image_top && mouse_pos.y <= image_top + image_size.y {
+
+                // Mouse position relative to image (0-1 range)
+                let relative_x = (mouse_pos.x - image_left) / image_size.x;
+                let relative_y = (mouse_pos.y - image_top) / image_size.y;
+
+                // 100px x 100px area in UV space
+                let uv_width = 100.0 / image_size.x;   // 100px / 280px
+                let uv_height = 100.0 / image_size.y;  // 100px / 180px
+
+                // Center the UV rectangle on the mouse position
+                let uv_min_x = (relative_x - uv_width / 2.0).clamp(0.0, 1.0 - uv_width);
+                let uv_min_y = (relative_y - uv_height / 2.0).clamp(0.0, 1.0 - uv_height);
+                let uv_max_x = uv_min_x + uv_width;
+                let uv_max_y = uv_min_y + uv_height;
+
+                // Set UV rect for magnification
+                image_node.rect = Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y));
+            }
+        }
+    }
+}
