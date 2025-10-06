@@ -8,6 +8,7 @@ use image;
 use image::GenericImageView;
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct ImageViewer {
     loaded_image: Option<Handle>,
     loaded_path: Option<PathBuf>,
@@ -23,6 +24,7 @@ struct ImageViewer {
 }
 
 impl ImageViewer {
+    #[allow(dead_code)]
     fn load_image_from_path(&mut self, path: &Path) -> Result<(), String> {
         let img = image::open(path).map_err(|e| e.to_string())?;
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -37,6 +39,7 @@ impl ImageViewer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Message {
     OpenFileDialog,
     FileSelected(Option<PathBuf>),
@@ -47,6 +50,7 @@ pub enum Message {
     MouseMoved(Point),
 }
 
+#[allow(dead_code)]
 fn update(state: &mut ImageViewer, message: Message) -> Task<Message> {
     match message {
         Message::OpenFileDialog => Task::perform(
@@ -118,7 +122,8 @@ fn update(state: &mut ImageViewer, message: Message) -> Task<Message> {
     }
 }
 
-fn view(state: &ImageViewer) -> Element<Message> {
+#[allow(dead_code)]
+fn view(state: &ImageViewer) -> Element<'_, Message> {
     let browse_button = button("Load image…").on_press(Message::OpenFileDialog);
 
     let path_input = text_input("Enter an image path", &state.input_path)
@@ -171,6 +176,7 @@ fn view(state: &ImageViewer) -> Element<Message> {
     content.into()
 }
 
+#[allow(dead_code)]
 pub fn my_counter() -> iced::Result {
     iced::application("Image Loader", update, view).run()
 }

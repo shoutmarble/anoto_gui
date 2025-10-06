@@ -1,6 +1,7 @@
 use kornia::{image::{Image, ImageSize}, imgproc};
 use kornia::io::functional as F;
 
+#[allow(dead_code)]
 pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
     // read the image
     // let image: Image<u8, 3, _> = F::read_image_any_rgb8("tests/data/dog.jpeg")?;

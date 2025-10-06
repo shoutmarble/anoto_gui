@@ -1,11 +1,11 @@
 use argh::FromArgs;
-use kornia::tensor::CpuAllocator;
 use std::path::PathBuf;
 
 use kornia::io::functional as F;
 use kornia::{image::Image, imgproc};
 
 #[derive(FromArgs)]
+#[allow(dead_code)]
 /// Binary threshold an image and log it to Rerun
 struct Args {
     /// path to an input image
@@ -13,6 +13,7 @@ struct Args {
     image_path: PathBuf,
 }
 
+#[allow(dead_code)]
 pub fn binarize() -> Result<(), Box<dyn std::error::Error>> {
     // let args: Args = argh::from_env();
 

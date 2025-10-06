@@ -1,21 +1,22 @@
 use argh::FromArgs;
-use kornia::tensor::CpuAllocator;
 use std::{fs, path::PathBuf};
 
 use kornia::io::functional as F;
 use kornia::{
-    image::{ops, Image, ImageSize},
+    image::Image,
     imgproc,
 };
 
 #[derive(FromArgs)]
-/// Perform basic image processing and log it to Rerun
+#[allow(dead_code)]
+/// Image process an image and log it to Rerun
 struct Args {
     /// path to an input image
     #[argh(option, short = 'i')]
     image_path: PathBuf,
 }
 
+#[allow(dead_code)]
 pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
     // read the image from the assets (hard-coded path)
     let image = F::read_image_any_rgb8("src/kornia/assets/anoto_dots.png")?;
@@ -97,26 +98,22 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
 
             // check 4-neighbors for background -> this pixel is on the boundary
             let mut is_edge = false;
-            if x > 0 {
-                if bin_slice[idx - 1] == 0 {
+            if x > 0
+                && bin_slice[idx - 1] == 0 {
                     is_edge = true;
                 }
-            }
-            if x + 1 < width_usize {
-                if bin_slice[idx + 1] == 0 {
+            if x + 1 < width_usize
+                && bin_slice[idx + 1] == 0 {
                     is_edge = true;
                 }
-            }
-            if y > 0 {
-                if bin_slice[idx - width_usize] == 0 {
+            if y > 0
+                && bin_slice[idx - width_usize] == 0 {
                     is_edge = true;
                 }
-            }
-            if y + 1 < height_usize {
-                if bin_slice[idx + width_usize] == 0 {
+            if y + 1 < height_usize
+                && bin_slice[idx + width_usize] == 0 {
                     is_edge = true;
                 }
-            }
 
             if is_edge {
                 edges_buf[idx] = 255u8;
@@ -295,7 +292,7 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // draw dots using anchors
-    for (_label_idx, anchor) in anchors.iter().enumerate() {
+    for anchor in anchors.iter() {
         let (cx_u, cy_u) = match anchor {
             Some(c) => *c,
             None => continue,

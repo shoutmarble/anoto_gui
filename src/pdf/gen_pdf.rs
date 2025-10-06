@@ -6,15 +6,18 @@ use std::fs;
 
 #[derive(Deserialize)]
 struct BitMatrix {
+    #[allow(dead_code)]
     data: Vec<Vec<[u8; 2]>>,
 }
-enum anoto_dot {
+#[allow(dead_code)]
+enum AnotoDot {
     Up,
     Down,
     Left,
     Right,
 }
 
+#[allow(dead_code)]
 pub fn gen_anoto_pdf() -> Result<()> {
     // Create a new document
     let mut doc = Document::new();
@@ -43,13 +46,13 @@ pub fn gen_anoto_pdf() -> Result<()> {
             let x = j as f64 * 10.0;
             let y = i as f64 * 10.0;
             if cell[0] == 0 && cell[1] == 0 {
-                draw_anoto_dot(&mut page, x, y, anoto_dot::Up);
+                draw_anoto_dot(&mut page, x, y, AnotoDot::Up);
             } else if cell[0] == 1 && cell[1] == 0 {
-                draw_anoto_dot(&mut page, x, y, anoto_dot::Left);
+                draw_anoto_dot(&mut page, x, y, AnotoDot::Left);
             } else if cell[0] == 0 && cell[1] == 1 {
-                draw_anoto_dot(&mut page, x, y, anoto_dot::Right);
+                draw_anoto_dot(&mut page, x, y, AnotoDot::Right);
             } else if cell[0] == 1 && cell[1] == 1 {
-                draw_anoto_dot(&mut page, x, y, anoto_dot::Down);
+                draw_anoto_dot(&mut page, x, y, AnotoDot::Down);
             }
         }
     }
@@ -65,6 +68,7 @@ pub fn gen_anoto_pdf() -> Result<()> {
 }
 
 
+#[allow(dead_code)]
 fn gen_all_dots_anoto_pdf() -> Result<()> {
     // Create a new document
     let mut doc = Document::new();
@@ -80,10 +84,10 @@ fn gen_all_dots_anoto_pdf() -> Result<()> {
 
         for y in (0..page_height as u32).step_by(10) {
 
-            draw_anoto_dot(&mut page, x as f64, y as f64, anoto_dot::Up);
-            draw_anoto_dot(&mut page, x as f64, y as f64, anoto_dot::Down);
-            draw_anoto_dot(&mut page, x as f64, y as f64, anoto_dot::Left);
-            draw_anoto_dot(&mut page, x as f64, y as f64, anoto_dot::Right);
+            draw_anoto_dot(&mut page, x as f64, y as f64, AnotoDot::Up);
+            draw_anoto_dot(&mut page, x as f64, y as f64, AnotoDot::Down);
+            draw_anoto_dot(&mut page, x as f64, y as f64, AnotoDot::Left);
+            draw_anoto_dot(&mut page, x as f64, y as f64, AnotoDot::Right);
 
             // draw_grid_lines(&mut page, 10.0);
 
@@ -101,6 +105,7 @@ fn gen_all_dots_anoto_pdf() -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn draw_grid_lines(page: &mut Page, spacing: f64) {
     let page_width = page.width();
     let page_height = page.height();
@@ -128,33 +133,34 @@ fn draw_grid_lines(page: &mut Page, spacing: f64) {
     }
 }
 
-fn draw_anoto_dot(page: &mut Page, x: f64, y: f64, direction: anoto_dot) {
+#[allow(dead_code)]
+fn draw_anoto_dot(page: &mut Page, x: f64, y: f64, direction: AnotoDot) {
 
     let radius = 1.0;
 
     match direction {
-        anoto_dot::Up => {
+        AnotoDot::Up => {
             let y_up = y + 3.0;
             page.graphics()
                 .set_fill_color(Color::blue())
                 .circle(x, y_up, radius)
                 .fill();
         },
-        anoto_dot::Down => {
+        AnotoDot::Down => {
             let y_down = y - 3.0;
             page.graphics()
                 .set_fill_color(Color::black())
                 .circle(x, y_down, radius)
                 .fill();
         },
-        anoto_dot::Left => {
+        AnotoDot::Left => {
             let x_left = x - 3.0;
             page.graphics()
                 .set_fill_color(Color::red())
                 .circle(x_left, y, radius)
                 .fill();
         },
-        anoto_dot::Right => {
+        AnotoDot::Right => {
             let x_right = x + 3.0;
             page.graphics()
                 .set_fill_color(Color::magenta())

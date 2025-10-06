@@ -17,6 +17,7 @@ use oxidize_pdf::text::Font;
 use oxidize_pdf::Document;
 use std::error::Error;
 
+#[allow(dead_code)]
 pub fn comprehensive() -> Result<(), Box<dyn Error>> {
     println!("Creating comprehensive chart test PDF...");
 
@@ -58,6 +59,7 @@ pub fn comprehensive() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn demonstrate_pdf_standard_comprehensive(page: &mut Page) -> Result<(), Box<dyn Error>> {
     // Title
     page.text()
@@ -156,6 +158,7 @@ fn demonstrate_pdf_standard_comprehensive(page: &mut Page) -> Result<(), Box<dyn
     Ok(())
 }
 
+#[allow(dead_code)]
 fn demonstrate_screen_space_comprehensive(page: &mut Page) -> Result<(), Box<dyn Error>> {
     // Title
     page.text()
@@ -240,6 +243,7 @@ fn demonstrate_screen_space_comprehensive(page: &mut Page) -> Result<(), Box<dyn
     Ok(())
 }
 
+#[allow(dead_code)]
 fn demonstrate_value_text_alignment(page: &mut Page) -> Result<(), Box<dyn Error>> {
     // Title
     page.text()
@@ -311,6 +315,7 @@ fn demonstrate_value_text_alignment(page: &mut Page) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+#[allow(dead_code)]
 fn demonstrate_line_chart_axis_labels(page: &mut Page) -> Result<(), Box<dyn Error>> {
     // Title
     page.text()
