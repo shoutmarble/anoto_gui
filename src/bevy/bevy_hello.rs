@@ -375,7 +375,6 @@ fn magnifier_system(
     )>,
     window_query: Query<&Window>,
     selected_image: Res<SelectedImage>,
-    mut last_hover_state: Local<bool>,
 ) {
     let Ok(window) = window_query.single() else { return };
 
@@ -429,103 +428,140 @@ fn magnifier_system(
         }
     }
 
-    if is_hovering != *last_hover_state {
-        *last_hover_state = is_hovering;
-
-        if is_hovering {
-            // Create magnifier if it doesn't exist and we have an image
-            if param_set.p0().is_empty() && image_handle.is_some() {
-                commands.spawn((
-                    Magnifier,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(200.0),
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(mouse_pos.x + 20.0),
-                        top: Val::Px(mouse_pos.y + 20.0),
-                        border: UiRect::all(Val::Px(2.0)),
-                        ..default()
-                    },
-                    BorderColor::all(Color::BLACK),
-                    BorderRadius::all(Val::Px(5.0)),
-                    BackgroundColor(Color::WHITE),
-                    ImageNode::new(image_handle.clone().unwrap()),
-                    ZIndex(1000),
-                ));
-                
-                // Create rectangle overlay on the original image
-                commands.spawn((
-                    MagnifierRectangle,
-                    Node {
-                        width: Val::Px(50.0),
-                        height: Val::Px(50.0),
-                        position_type: PositionType::Absolute,
-                        border: UiRect::all(Val::Px(2.0)),
-                        ..default()
-                    },
-                    BorderColor::all(Color::srgb(1.0, 0.0, 0.0)), // Red border
-                    BackgroundColor(Color::NONE), // Transparent background
-                    ZIndex(999), // Just below magnifier
-                ));
-            }
-        } else {
-            // Remove magnifier and rectangle when not hovering
-            for (entity, _, _) in param_set.p0().iter() {
-                commands.entity(entity).despawn();
-            }
-            for (entity, _) in param_set.p2().iter() {
-                commands.entity(entity).despawn();
-            }
-        }
-    }
-
-    if is_hovering && !param_set.p0().is_empty() {
-        // Use the actual image bounds we calculated above
-        let image_left = actual_image_bounds.min.x;
-        let image_top = actual_image_bounds.min.y;
-        let image_width = actual_image_bounds.width();
-        let image_height = actual_image_bounds.height();
-        
-        // Update magnifier position and UV coordinates
-        for (_, mut node, mut image_node) in param_set.p0().iter_mut() {
-            // Position magnifier near mouse cursor (offset to avoid covering the cursor)
-            let offset_x = if mouse_pos.x + 220.0 > window.width() { -220.0 } else { 20.0 };
-            let offset_y = if mouse_pos.y + 220.0 > window.height() { -220.0 } else { 20.0 };
+    if is_hovering {
+        if param_set.p0().is_empty() && image_handle.is_some() {
+            // Calculate initial UV rect for the current mouse position
+            let image_left = actual_image_bounds.min.x;
+            let image_top = actual_image_bounds.min.y;
+            let image_width = actual_image_bounds.width();
+            let image_height = actual_image_bounds.height();
             
-            node.left = Val::Px(mouse_pos.x + offset_x);
-            node.top = Val::Px(mouse_pos.y + offset_y);
-
-            // We already know mouse is within image bounds from the is_hovering check
-            // Mouse position relative to image (0-1 range)
             let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
             let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
-
-            // Define magnification area size (50px x 50px area in the display)
+            
             let magnify_area_px = 50.0;
             let uv_width = magnify_area_px / image_width;
             let uv_height = magnify_area_px / image_height;
-
-            // Center the UV rectangle on the mouse position, allowing edge clamping
+            
             let uv_center_x = relative_x;
             let uv_center_y = relative_y;
             let uv_min_x = (uv_center_x - uv_width / 2.0).max(0.0);
             let uv_min_y = (uv_center_y - uv_height / 2.0).max(0.0);
             let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
             let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
-
-            // Set UV rect for magnification - Bevy uses 0,0 at top-left
-            image_node.rect = Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y));
-        }
-        
-        // Update rectangle overlay position
-        for (_, mut rect_node) in param_set.p2().iter_mut() {
-            // Position rectangle centered on mouse position (we already know mouse is within bounds)
+            
+            commands.spawn((
+                Magnifier,
+                Node {
+                    width: Val::Px(200.0),
+                    height: Val::Px(200.0),
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(mouse_pos.x + 20.0),
+                    top: Val::Px(mouse_pos.y + 20.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    ..default()
+                },
+                BorderColor::all(Color::BLACK),
+                BorderRadius::all(Val::Px(5.0)),
+                ImageNode {
+                    image: image_handle.clone().unwrap(),
+                    rect: Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y)),
+                    flip_y: true,
+                    ..default()
+                },
+                ZIndex(1000),
+            ));
+            
+            // Create rectangle overlay on the original image
             let rect_size = 50.0;
             let rect_left = mouse_pos.x - rect_size / 2.0;
             let rect_top = mouse_pos.y - rect_size / 2.0;
             
-            rect_node.left = Val::Px(rect_left);
-            rect_node.top = Val::Px(rect_top);
+            commands.spawn((
+                MagnifierRectangle,
+                Node {
+                    width: Val::Px(50.0),
+                    height: Val::Px(50.0),
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(rect_left),
+                    top: Val::Px(rect_top),
+                    border: UiRect::all(Val::Px(2.0)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgb(1.0, 0.0, 0.0)), // Red border
+                BackgroundColor(Color::NONE), // Transparent background
+                ZIndex(999), // Just below magnifier
+            ));
+        } else if !param_set.p0().is_empty() {
+            // Update existing magnifier and rectangle
+            // Use the actual image bounds we calculated above
+            let image_left = actual_image_bounds.min.x;
+            let image_top = actual_image_bounds.min.y;
+            let image_width = actual_image_bounds.width();
+            let image_height = actual_image_bounds.height();
+            
+            // Calculate new UV rect
+            let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
+            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
+
+            let magnify_area_px = 50.0;
+            let uv_width = magnify_area_px / image_width;
+            let uv_height = magnify_area_px / image_height;
+
+            let uv_center_x = relative_x;
+            let uv_center_y = relative_y;
+            let uv_min_x = (uv_center_x - uv_width / 2.0).max(0.0);
+            let uv_min_y = (uv_center_y - uv_height / 2.0).max(0.0);
+            let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
+            let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
+            
+            let new_rect = Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y);
+            
+            // Recreate magnifier with new rect
+            for (entity, node, _) in param_set.p0().iter() {
+                commands.entity(entity).despawn();
+                
+                commands.spawn((
+                    Magnifier,
+                    Node {
+                        width: Val::Px(200.0),
+                        height: Val::Px(200.0),
+                        position_type: PositionType::Absolute,
+                        left: node.left,
+                        top: node.top,
+                        border: node.border,
+                        ..default()
+                    },
+                    BorderColor::all(Color::BLACK),
+                    BorderRadius::all(Val::Px(5.0)),
+                    ImageNode {
+                        image: image_handle.clone().unwrap(),
+                        rect: Some(new_rect),
+                        flip_y: true,
+                        ..default()
+                    },
+                    ZIndex(1000),
+                ));
+            }
+            
+            // Update rectangle overlay position
+            for (_, mut rect_node) in param_set.p2().iter_mut() {
+                // Position rectangle centered on mouse position (we already know mouse is within bounds)
+                let rect_size = 50.0;
+                let rect_left = mouse_pos.x - rect_size / 2.0;
+                let rect_top = mouse_pos.y - rect_size / 2.0;
+                
+                rect_node.left = Val::Px(rect_left);
+                rect_node.top = Val::Px(rect_top);
+            }
+        }
+    } else {
+        // Remove magnifier and rectangle when not hovering
+        for (entity, _, _) in param_set.p0().iter() {
+            commands.entity(entity).despawn();
+        }
+        for (entity, _) in param_set.p2().iter() {
+            commands.entity(entity).despawn();
         }
     }
 }
