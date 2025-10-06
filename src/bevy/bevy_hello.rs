@@ -6,12 +6,14 @@
 //! matures, so please exercise caution if you are using this as a reference for your own code,
 //! and note that there are still "user experience" issues with this API.
 
+use bevy_shader::ShaderRef;
 use bevy::{
-    asset::AssetPlugin,
+    asset::{AssetPlugin, Handle},
     ecs::system::ParamSet,
     input_focus::tab_navigation::{TabGroup, TabIndex},
     picking::hover::Hovered,
     prelude::*,
+    render::render_resource::AsBindGroup,
     window::{Window, WindowMode, WindowPlugin, WindowPosition, WindowResolution, PresentMode},
 };
 use bevy_ui_widgets::{
@@ -20,6 +22,23 @@ use bevy_ui_widgets::{
 };
 use std::path::PathBuf;
 use image::ImageReader;
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct MagnifierMaterial {
+    #[uniform(0)]
+    uv_min: Vec2,
+    #[uniform(1)]
+    uv_max: Vec2,
+    #[texture(2)]
+    #[sampler(3)]
+    texture: Handle<Image>,
+}
+
+impl UiMaterial for MagnifierMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Path("shaders/magnifier.wgsl".into())
+    }
+}
 
 pub fn bevy_hello() {
     App::new()
@@ -46,6 +65,7 @@ pub fn bevy_hello() {
         ))
         .init_resource::<SelectedImage>()
         .init_resource::<DialogState>()
+        .init_asset::<MagnifierMaterial>()
         .add_systems(Startup, (setup, startup_check).chain())
         .add_systems(Update, image_select_system)
         .add_systems(Update, dialog_system)
@@ -369,12 +389,13 @@ struct MagnifierRectangle;
 fn magnifier_system(
     mut commands: Commands,
     mut param_set: ParamSet<(
-        Query<(Entity, &mut Node, &mut ImageNode), With<Magnifier>>,
+        Query<(Entity, &mut Node, &mut MaterialNode<MagnifierMaterial>), With<Magnifier>>,
         Query<(&ImageNode, &Node), With<DisplayedImage>>,
         Query<(Entity, &mut Node), With<MagnifierRectangle>>,
     )>,
     window_query: Query<&Window>,
     selected_image: Res<SelectedImage>,
+    mut materials: ResMut<Assets<MagnifierMaterial>>,
 ) {
     let Ok(window) = window_query.single() else { return };
 
@@ -450,6 +471,14 @@ fn magnifier_system(
             let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
             let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
             
+            let magnifier_material = MagnifierMaterial {
+                uv_min: Vec2::new(uv_min_x, uv_min_y),
+                uv_max: Vec2::new(uv_max_x, uv_max_y),
+                texture: image_handle.clone().unwrap(),
+            };
+            
+            let material_handle = materials.add(magnifier_material);
+            
             commands.spawn((
                 Magnifier,
                 Node {
@@ -463,13 +492,7 @@ fn magnifier_system(
                 },
                 BorderColor::all(Color::BLACK),
                 BorderRadius::all(Val::Px(5.0)),
-                ImageNode {
-                    image: image_handle.clone().unwrap(),
-                    rect: Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y)),
-                    flip_y: true,
-                    ..default()
-                },
-                ZIndex(1000),
+                MaterialNode(material_handle),
             ));
             
             // Create rectangle overlay on the original image
@@ -515,33 +538,22 @@ fn magnifier_system(
             let uv_max_x = (uv_center_x + uv_width / 2.0).min(1.0);
             let uv_max_y = (uv_center_y + uv_height / 2.0).min(1.0);
             
-            let new_rect = Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y);
+            let _new_rect = Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y);
             
-            // Recreate magnifier with new rect
-            for (entity, node, _) in param_set.p0().iter() {
-                commands.entity(entity).despawn();
+            // Update existing magnifier material and position
+            for (_entity, mut node, material_node) in param_set.p0().iter_mut() {
+                // Update material properties
+                if let Some(material) = materials.get_mut(&material_node.0) {
+                    material.uv_min = Vec2::new(uv_min_x, uv_min_y);
+                    material.uv_max = Vec2::new(uv_max_x, uv_max_y);
+                }
                 
-                commands.spawn((
-                    Magnifier,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(200.0),
-                        position_type: PositionType::Absolute,
-                        left: node.left,
-                        top: node.top,
-                        border: node.border,
-                        ..default()
-                    },
-                    BorderColor::all(Color::BLACK),
-                    BorderRadius::all(Val::Px(5.0)),
-                    ImageNode {
-                        image: image_handle.clone().unwrap(),
-                        rect: Some(new_rect),
-                        flip_y: true,
-                        ..default()
-                    },
-                    ZIndex(1000),
-                ));
+                // Position magnifier near mouse cursor (offset to avoid covering the cursor)
+                let offset_x = if mouse_pos.x + 220.0 > window.width() { -220.0 } else { 20.0 };
+                let offset_y = if mouse_pos.y + 220.0 > window.height() { -220.0 } else { 20.0 };
+                
+                node.left = Val::Px(mouse_pos.x + offset_x);
+                node.top = Val::Px(mouse_pos.y + offset_y);
             }
             
             // Update rectangle overlay position

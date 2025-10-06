@@ -310,6 +310,7 @@ version = "0.1.0"
 dependencies = [
  "argh",
  "bevy",
+ "bevy_shader",
  "bevy_ui_widgets",
  "bytesize",
  "futures",
