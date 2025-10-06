@@ -339,11 +339,15 @@ fn update_image_display(
 #[derive(Component)]
 struct DisplayedImage;
 
+#[derive(Component)]
+struct MagnifierRectangle;
+
 fn magnifier_system(
     mut commands: Commands,
     mut param_set: ParamSet<(
         Query<(Entity, &mut Node, &mut ImageNode), With<Magnifier>>,
         Query<&ImageNode, With<DisplayedImage>>,
+        Query<(Entity, &mut Node), With<MagnifierRectangle>>,
     )>,
     window_query: Query<&Window>,
     mut last_hover_state: Local<bool>,
@@ -401,16 +405,42 @@ fn magnifier_system(
                     },
                     ZIndex(1000),
                 ));
+                
+                // Create rectangle overlay on the original image
+                commands.spawn((
+                    MagnifierRectangle,
+                    Node {
+                        width: Val::Px(50.0),
+                        height: Val::Px(50.0),
+                        position_type: PositionType::Absolute,
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::srgb(1.0, 0.0, 0.0)), // Red border
+                    BackgroundColor(Color::NONE), // Transparent background
+                    ZIndex(999), // Just below magnifier
+                ));
             }
         } else {
-            // Remove magnifier when not hovering
+            // Remove magnifier and rectangle when not hovering
             for (entity, _, _) in param_set.p0().iter() {
+                commands.entity(entity).despawn();
+            }
+            for (entity, _) in param_set.p2().iter() {
                 commands.entity(entity).despawn();
             }
         }
     }
 
     if is_hovering && !param_set.p0().is_empty() {
+        // Calculate image layout once for both magnifier and rectangle
+        let window_size = Vec2::new(window.width(), window.height());
+        let display_area_size = Vec2::new(300.0, 200.0);
+        let image_size = Vec2::new(280.0, 180.0);
+        let display_area_pos = (window_size - display_area_size) / 2.0;
+        let image_left = display_area_pos.x + 10.0; // 10px margin
+        let image_top = display_area_pos.y + 10.0;  // 10px margin
+        
         // Update magnifier position and UV coordinates
         for (_, mut node, mut image_node) in param_set.p0().iter_mut() {
             // Position magnifier near mouse cursor (offset to avoid covering the cursor)
@@ -419,17 +449,6 @@ fn magnifier_system(
             
             node.left = Val::Px(mouse_pos.x + offset_x);
             node.top = Val::Px(mouse_pos.y + offset_y);
-
-            // Calculate UV coordinates for the magnified area
-            // The displayed image is positioned within the UI layout
-            let window_size = Vec2::new(window.width(), window.height());
-            let display_area_size = Vec2::new(300.0, 200.0);
-            let image_size = Vec2::new(280.0, 180.0);
-
-            // Calculate image position (centered in window)
-            let display_area_pos = (window_size - display_area_size) / 2.0;
-            let image_left = display_area_pos.x + 10.0; // 10px margin
-            let image_top = display_area_pos.y + 10.0;  // 10px margin
 
             // Check if mouse is within image bounds
             if mouse_pos.x >= image_left && mouse_pos.x <= image_left + image_size.x &&
@@ -452,6 +471,22 @@ fn magnifier_system(
 
                 // Set UV rect for magnification (this crops the image to show only the magnified area)
                 image_node.rect = Some(Rect::new(uv_min_x, uv_min_y, uv_max_x, uv_max_y));
+            }
+        }
+        
+        // Update rectangle overlay position
+        for (_, mut rect_node) in param_set.p2().iter_mut() {
+            // Check if mouse is within image bounds
+            if mouse_pos.x >= image_left && mouse_pos.x <= image_left + image_size.x &&
+               mouse_pos.y >= image_top && mouse_pos.y <= image_top + image_size.y {
+                
+                // Position rectangle centered on mouse position, but constrained to image bounds
+                let rect_size = 50.0;
+                let rect_left = (mouse_pos.x - rect_size / 2.0).clamp(image_left, image_left + image_size.x - rect_size);
+                let rect_top = (mouse_pos.y - rect_size / 2.0).clamp(image_top, image_top + image_size.y - rect_size);
+                
+                rect_node.left = Val::Px(rect_left);
+                rect_node.top = Val::Px(rect_top);
             }
         }
     }
