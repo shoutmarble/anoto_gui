@@ -90,6 +90,10 @@ struct SecondaryDisplayedImage;
 #[derive(Component)]
 struct MagnifierRectangle;
 
+/// Marker for the blue border around magnified area
+#[derive(Component)]
+struct MagnifierBlueBorder;
+
 fn image_display_area() -> impl Bundle {
     (
         ImageDisplay,
@@ -126,7 +130,7 @@ fn secondary_image_display_area() -> impl Bundle {
             align_items: AlignItems::Center,
             ..default()
         },
-        BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
+        BorderColor::all(Color::srgb(1.0, 0.84, 0.0)), // Gold border
         BackgroundColor(Color::srgb(0.9, 0.9, 0.9)),
         children![(
             SecondaryPlaceholderText,
@@ -469,6 +473,7 @@ fn magnifier_system(
         Query<(&ImageNode, &Node), With<DisplayedImage>>,
         Query<(Entity, &mut Node), With<MagnifierRectangle>>,
         Query<&mut ImageNode, With<SecondaryDisplayedImage>>,
+        Query<(Entity, &mut Node), With<MagnifierBlueBorder>>,
     )>,
     window_query: Query<&Window>,
     selected_image: Res<SelectedImage>,
@@ -549,7 +554,7 @@ fn magnifier_system(
         if cursor_pos.x >= main_image_left && cursor_pos.x <= main_image_right &&
            cursor_pos.y >= main_image_top && cursor_pos.y <= main_image_bottom {
             let relative_x = ((mouse_pos.x - main_image_left) / main_image_width).clamp(0.0, 1.0);
-            let relative_y = 1.0 - ((mouse_pos.y - main_image_top) / main_image_height).clamp(0.0, 1.0);
+            let relative_y = ((mouse_pos.y - main_image_top) / main_image_height).clamp(0.0, 1.0);
 
             let magnify_area_px = 100.0;
             let uv_width = magnify_area_px / main_image_width;
@@ -581,7 +586,7 @@ fn magnifier_system(
             let image_height = actual_image_bounds.height();
             
             let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
-            let relative_y = 1.0 - ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0); // Flip Y coordinate for UV
+            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
 
             let magnify_area_px = 100.0; // Crop 100x100 area for 1:1 display in 100x100 popup
             let uv_width = magnify_area_px / image_width;
@@ -628,14 +633,31 @@ fn magnifier_system(
                         width: Val::Px(100.0),
                         height: Val::Px(100.0),
                         position_type: PositionType::Absolute,
-                        left: Val::Px(mouse_pos.x + 20.0),
-                        top: Val::Px(mouse_pos.y + 20.0),
+                        left: Val::Px(mouse_pos.x + 52.0), // Position inside blue border (50 + 2 for border)
+                        top: Val::Px(mouse_pos.y + 52.0),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
                     BorderColor::all(Color::BLACK),
                     ZIndex(1000), // Ensure magnifier appears on top
                     ImageNode::new(cropped_handle),
+                ));
+                
+                // Create blue border around magnified area
+                commands.spawn((
+                    MagnifierBlueBorder,
+                    Node {
+                        width: Val::Px(104.0), // Slightly larger than 100x100 to surround it
+                        height: Val::Px(104.0),
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(mouse_pos.x + 50.0), // Position so corner touches red rectangle corner
+                        top: Val::Px(mouse_pos.y + 50.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::srgb(0.0, 0.0, 1.0)), // Blue border
+                    BackgroundColor(Color::NONE), // Transparent background
+                    ZIndex(999), // Just below magnifier
                 ));
             }
             
@@ -669,11 +691,11 @@ fn magnifier_system(
             
             // Calculate new UV rect
             let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
-            let relative_y = 1.0 - ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0); // Flip Y coordinate for UV
+            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
 
             let magnify_area_px = 100.0; // Crop 100x100 area for 1:1 display in 100x100 popup
-            let uv_width = magnify_area_px / image_width;
-            let uv_height = magnify_area_px / image_height;
+            let _uv_width = magnify_area_px / image_width;
+            let _uv_height = magnify_area_px / image_height;
 
             // Calculate pixel coordinates for cropping
             if let Some(ref img) = original_image.0 {
@@ -706,13 +728,40 @@ fn magnifier_system(
                     image_node.image = cropped_handle.clone();
                     image_node.rect = None;
                     
-                    // Position magnifier near mouse cursor (offset to avoid covering the cursor)
-                    let offset_x = if mouse_pos.x + 120.0 > window.width() { -120.0 } else { 20.0 };
-                    let offset_y = if mouse_pos.y + 120.0 > window.height() { -120.0 } else { 20.0 };
+                    // Position magnifier inside the blue border (same logic as blue border + 2px for border)
+                    let mut magnifier_left = mouse_pos.x + 52.0; // 50 + 2 for blue border width
+                    let mut magnifier_top = mouse_pos.y + 52.0;
                     
-                    node.left = Val::Px(mouse_pos.x + offset_x);
-                    node.top = Val::Px(mouse_pos.y + offset_y);
+                    // Adjust position if blue border would go off-screen (same logic as blue border)
+                    if mouse_pos.x + 50.0 + 104.0 > window.width() {
+                        magnifier_left = mouse_pos.x - 50.0 - 104.0 + 2.0; // Move to left side + border offset
+                    }
+                    if mouse_pos.y + 50.0 + 104.0 > window.height() {
+                        magnifier_top = mouse_pos.y - 50.0 - 104.0 + 2.0; // Move to top side + border offset
+                    }
+                    
+                    node.left = Val::Px(magnifier_left);
+                    node.top = Val::Px(magnifier_top);
                 }
+            }
+            
+            // Update blue border position
+            for (_, mut border_node) in param_set.p4().iter_mut() {
+                // Position blue border so its corner touches the red rectangle's corner
+                // Default: top-left corner of blue touches bottom-right corner of red
+                let mut border_left = mouse_pos.x + 50.0;
+                let mut border_top = mouse_pos.y + 50.0;
+                
+                // Adjust position if it would go off-screen
+                if border_left + 104.0 > window.width() {
+                    border_left = mouse_pos.x - 50.0 - 104.0; // Move to left side
+                }
+                if border_top + 104.0 > window.height() {
+                    border_top = mouse_pos.y - 50.0 - 104.0; // Move to top side
+                }
+                
+                border_node.left = Val::Px(border_left);
+                border_node.top = Val::Px(border_top);
             }
             
             // Update rectangle overlay position
@@ -728,7 +777,7 @@ fn magnifier_system(
 
             // Update secondary image display with magnified content
             let relative_x = ((mouse_pos.x - image_left) / image_width).clamp(0.0, 1.0);
-            let relative_y = 1.0 - ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
+            let relative_y = ((mouse_pos.y - image_top) / image_height).clamp(0.0, 1.0);
 
             let magnify_area_px = 100.0;
             let uv_width = magnify_area_px / image_width;
@@ -755,6 +804,9 @@ fn magnifier_system(
             commands.entity(entity).despawn();
         }
         for (entity, _) in param_set.p2().iter() {
+            commands.entity(entity).despawn();
+        }
+        for (entity, _) in param_set.p4().iter() {
             commands.entity(entity).despawn();
         }
 
