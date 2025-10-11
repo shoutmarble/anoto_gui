@@ -352,6 +352,7 @@ fn update_image_display(
     secondary_displayed_images: Query<Entity, With<SecondaryDisplayedImage>>,
     placeholder_text: Query<Entity, With<PlaceholderText>>,
     secondary_placeholder_text: Query<Entity, With<SecondaryPlaceholderText>>,
+    window_query: Query<&Window>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if selected_image.path != *last_path && !selected_image.is_loading {
@@ -424,6 +425,24 @@ fn update_image_display(
         && let Some(handle) = &selected_image.handle {
             println!("Displaying loaded image...");
 
+            // Get window dimensions
+            let Ok(window) = window_query.single() else { return };
+            let window_width = window.width();
+            let window_height = window.height();
+
+            // Calculate available space for main display (80% width, accounting for 2px border)
+            let main_available_width = (window_width * 0.8) - 4.0;
+            let main_available_height = window_height - 4.0;
+
+            // Calculate available space for secondary display (20% width, accounting for 2px border)
+            let secondary_available_width = (window_width * 0.2) - 4.0;
+            let secondary_available_height = window_height - 4.0;
+
+            // Get image dimensions
+            let (img_width, img_height) = selected_image.dimensions.unwrap_or((100, 100));
+            let img_width_f = img_width as f32;
+            let img_height_f = img_height as f32;
+
             // Remove placeholder text
             for text_entity in placeholder_text.iter() {
                 commands.entity(text_entity).despawn();
@@ -432,6 +451,16 @@ fn update_image_display(
                 commands.entity(text_entity).despawn();
             }
 
+            // Spawn main image with scaling and border
+            let main_scale = (main_available_width / img_width_f).min(main_available_height / img_height_f);
+            let main_border_color = if main_scale < 1.0 {
+                Color::srgb(1.0, 0.0, 0.0) // Red for scaled down
+            } else if main_scale > 1.0 {
+                Color::srgb(0.0, 1.0, 0.0) // Green for scaled up
+            } else {
+                Color::srgb(0.5, 0.5, 0.5) // Default gray for no scaling
+            };
+
             for container_entity in image_display_query.iter() {
                 commands.entity(container_entity).with_children(|parent| {
                     parent.spawn((
@@ -439,13 +468,25 @@ fn update_image_display(
                         DisplayedImage,
                         Hovered::default(),
                         Node {
-                            width: Val::Percent(100.0), // Fill the entire container width
-                            height: Val::Auto, // Auto height to maintain aspect ratio
+                            width: Val::Px(img_width_f * main_scale),
+                            height: Val::Px(img_height_f * main_scale),
+                            border: UiRect::all(px(2)),
                             ..default()
                         },
+                        BorderColor::all(main_border_color),
                     ));
                 });
             }
+
+            // Spawn secondary image with scaling and border
+            let secondary_scale = (secondary_available_width / img_width_f).min(secondary_available_height / img_height_f);
+            let secondary_border_color = if secondary_scale < 1.0 {
+                Color::srgb(1.0, 0.0, 0.0) // Red for scaled down
+            } else if secondary_scale > 1.0 {
+                Color::srgb(0.0, 1.0, 0.0) // Green for scaled up
+            } else {
+                Color::srgb(0.5, 0.5, 0.5) // Default gray for no scaling
+            };
 
             for container_entity in secondary_image_display_query.iter() {
                 commands.entity(container_entity).with_children(|parent| {
@@ -454,10 +495,12 @@ fn update_image_display(
                         SecondaryDisplayedImage,
                         Hovered::default(),
                         Node {
-                            width: Val::Percent(100.0), // Fill the entire container width
-                            height: Val::Auto, // Auto height to maintain aspect ratio
+                            width: Val::Px(img_width_f * secondary_scale),
+                            height: Val::Px(img_height_f * secondary_scale),
+                            border: UiRect::all(px(2)),
                             ..default()
                         },
+                        BorderColor::all(secondary_border_color),
                     ));
                 });
             }
@@ -471,9 +514,9 @@ fn magnifier_system(
     mut param_set: ParamSet<(
         Query<(Entity, &mut Node, &mut ImageNode), With<Magnifier>>,
         Query<(&ImageNode, &Node), With<DisplayedImage>>,
-        Query<(Entity, &mut Node), With<MagnifierRectangle>>,
+        Query<(Entity, &mut Node, &mut ImageNode), With<MagnifierRectangle>>,
         Query<&mut ImageNode, With<SecondaryDisplayedImage>>,
-        Query<(Entity, &mut Node), With<MagnifierBlueBorder>>,
+        Query<(Entity, &mut Node, &mut ImageNode), With<MagnifierBlueBorder>>,
     )>,
     window_query: Query<&Window>,
     selected_image: Res<SelectedImage>,
@@ -633,53 +676,50 @@ fn magnifier_system(
                         width: Val::Px(100.0),
                         height: Val::Px(100.0),
                         position_type: PositionType::Absolute,
-                        left: Val::Px(mouse_pos.x + 52.0), // Position inside blue border (50 + 2 for border)
-                        top: Val::Px(mouse_pos.y + 52.0),
+                        left: Val::Px(mouse_pos.x - 50.0), // Center the 100x100 magnifier at mouse position
+                        top: Val::Px(mouse_pos.y - 50.0),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
                     BorderColor::all(Color::BLACK),
                     ZIndex(1000), // Ensure magnifier appears on top
-                    ImageNode::new(cropped_handle),
+                    ImageNode::new(cropped_handle.clone()),
                 ));
                 
-                // Create blue border around magnified area
+                // Create blue border - 400x400 pixels positioned to the right of red square + 5px
                 commands.spawn((
                     MagnifierBlueBorder,
                     Node {
-                        width: Val::Px(104.0), // Slightly larger than 100x100 to surround it
-                        height: Val::Px(104.0),
+                        width: Val::Px(400.0), // 400x400 pixels
+                        height: Val::Px(400.0),
                         position_type: PositionType::Absolute,
-                        left: Val::Px(mouse_pos.x + 50.0), // Position so corner touches red rectangle corner
-                        top: Val::Px(mouse_pos.y + 50.0),
+                        left: Val::Px(mouse_pos.x + 55.0), // Right of red square + 5px (red right edge at mouse_pos.x + 50)
+                        top: Val::Px(mouse_pos.y - 200.0), // Centered vertically on mouse position
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
                     BorderColor::all(Color::srgb(0.0, 0.0, 1.0)), // Blue border
                     BackgroundColor(Color::NONE), // Transparent background
                     ZIndex(999), // Just below magnifier
+                    ImageNode::new(cropped_handle.clone()), // Show the magnified content
                 ));
             }
             
-            // Create rectangle overlay on the original image
-            let rect_size = 100.0; // Match the cropped area size
-            let rect_left = mouse_pos.x - rect_size / 2.0;
-            let rect_top = mouse_pos.y - rect_size / 2.0;
-            
+            // Red square acts as transparent hover - no image content, just border
             commands.spawn((
                 MagnifierRectangle,
                 Node {
-                    width: Val::Px(100.0),
+                    width: Val::Px(100.0), // 100x100 pixels
                     height: Val::Px(100.0),
                     position_type: PositionType::Absolute,
-                    left: Val::Px(rect_left),
-                    top: Val::Px(rect_top),
+                    left: Val::Px(mouse_pos.x - 50.0), // Centered at mouse position
+                    top: Val::Px(mouse_pos.y - 50.0),
                     border: UiRect::all(Val::Px(2.0)),
                     ..default()
                 },
                 BorderColor::all(Color::srgb(1.0, 0.0, 0.0)), // Red border
                 BackgroundColor(Color::NONE), // Transparent background
-                ZIndex(999), // Just below magnifier
+                ZIndex(1001), // On top of everything
             ));
         } else if !param_set.p0().is_empty() {
             // Update existing magnifier and rectangle
@@ -728,51 +768,75 @@ fn magnifier_system(
                     image_node.image = cropped_handle.clone();
                     image_node.rect = None;
                     
-                    // Position magnifier inside the blue border (same logic as blue border + 2px for border)
-                    let mut magnifier_left = mouse_pos.x + 52.0; // 50 + 2 for blue border width
-                    let mut magnifier_top = mouse_pos.y + 52.0;
+                    // Calculate red rectangle dimensions for blue border positioning
+                    let (_rect_width, _rect_height) = if let Some((img_width, img_height)) = selected_image.dimensions {
+                        let window_width = window.width();
+                        let left_column_width = window_width * 0.8;
+                        let aspect_ratio = img_width as f32 / img_height as f32;
+                        let displayed_width = left_column_width;
+                        let displayed_height = displayed_width / aspect_ratio;
+                        
+                        let scale_x = displayed_width / img_width as f32;
+                        let scale_y = displayed_height / img_height as f32;
+                        (100.0 * scale_x, 100.0 * scale_y)
+                    } else {
+                        (100.0, 100.0)
+                    };
                     
-                    // Adjust position if blue border would go off-screen (same logic as blue border)
-                    if mouse_pos.x + 50.0 + 104.0 > window.width() {
-                        magnifier_left = mouse_pos.x - 50.0 - 104.0 + 2.0; // Move to left side + border offset
+                    // Position magnifier centered at mouse position
+                    let mut magnifier_left = mouse_pos.x - 50.0;
+                    let mut magnifier_top = mouse_pos.y - 50.0;
+                    
+                    // Adjust position if magnifier would go off-screen
+                    if magnifier_left + 100.0 > window.width() {
+                        magnifier_left = window.width() - 100.0;
                     }
-                    if mouse_pos.y + 50.0 + 104.0 > window.height() {
-                        magnifier_top = mouse_pos.y - 50.0 - 104.0 + 2.0; // Move to top side + border offset
+                    if magnifier_left < 0.0 {
+                        magnifier_left = 0.0;
+                    }
+                    if magnifier_top + 100.0 > window.height() {
+                        magnifier_top = window.height() - 100.0;
+                    }
+                    if magnifier_top < 0.0 {
+                        magnifier_top = 0.0;
                     }
                     
                     node.left = Val::Px(magnifier_left);
                     node.top = Val::Px(magnifier_top);
                 }
-            }
-            
-            // Update blue border position
-            for (_, mut border_node) in param_set.p4().iter_mut() {
-                // Position blue border so its corner touches the red rectangle's corner
-                // Default: top-left corner of blue touches bottom-right corner of red
-                let mut border_left = mouse_pos.x + 50.0;
-                let mut border_top = mouse_pos.y + 50.0;
+                
+                // Update blue border position
+                for (_entity, mut border_node, mut border_image) in param_set.p4().iter_mut() {
+                    border_image.image = cropped_handle.clone();
+                    border_image.rect = None;
+                    
+                // Position blue border to the right of red square + 5px
+                let mut border_left = mouse_pos.x + 55.0; // Red square right edge + 5px
+                let mut border_top = mouse_pos.y - 200.0; // Centered vertically (400/2 = 200)
                 
                 // Adjust position if it would go off-screen
-                if border_left + 104.0 > window.width() {
-                    border_left = mouse_pos.x - 50.0 - 104.0; // Move to left side
+                if border_left + 400.0 > window.width() {
+                    border_left = mouse_pos.x - 50.0 - 400.0 - 5.0; // Move to left side of red square
                 }
-                if border_top + 104.0 > window.height() {
-                    border_top = mouse_pos.y - 50.0 - 104.0; // Move to top side
+                if border_top + 400.0 > window.height() {
+                    border_top = window.height() - 400.0; // Move to bottom
                 }
-                
-                border_node.left = Val::Px(border_left);
-                border_node.top = Val::Px(border_top);
+                if border_top < 0.0 {
+                    border_top = 0.0; // Move to top
+                }                    border_node.left = Val::Px(border_left);
+                    border_node.top = Val::Px(border_top);
+                }
             }
             
-            // Update rectangle overlay position
-            for (_, mut rect_node) in param_set.p2().iter_mut() {
-                // Position rectangle centered on mouse position (we already know mouse is within bounds)
-                let rect_size = 100.0; // Match the cropped area size
-                let rect_left = mouse_pos.x - rect_size / 2.0;
-                let rect_top = mouse_pos.y - rect_size / 2.0;
+                        // Update rectangle overlay position
+            for (_, mut rect_node, _) in param_set.p2().iter_mut() {
+                let rect_left = mouse_pos.x - 50.0; // Fixed 100x100 centered at mouse
+                let rect_top = mouse_pos.y - 50.0;
                 
                 rect_node.left = Val::Px(rect_left);
                 rect_node.top = Val::Px(rect_top);
+                rect_node.width = Val::Px(100.0); // Fixed size
+                rect_node.height = Val::Px(100.0);
             }
 
             // Update secondary image display with magnified content
@@ -799,15 +863,18 @@ fn magnifier_system(
             }
         }
     } else {
-        // Remove magnifier and rectangle when not hovering
-        for (entity, _, _) in param_set.p0().iter() {
-            commands.entity(entity).despawn();
+        // Move magnifier and rectangles off-screen when not hovering (instead of despawning to avoid artifacts)
+        for (_entity, mut node, _) in param_set.p0().iter_mut() {
+            node.left = Val::Px(-200.0); // Move off-screen
+            node.top = Val::Px(-200.0);
         }
-        for (entity, _) in param_set.p2().iter() {
-            commands.entity(entity).despawn();
+        for (_entity, mut rect_node, _) in param_set.p2().iter_mut() {
+            rect_node.left = Val::Px(-200.0); // Move off-screen
+            rect_node.top = Val::Px(-200.0);
         }
-        for (entity, _) in param_set.p4().iter() {
-            commands.entity(entity).despawn();
+        for (_entity, mut border_node, _) in param_set.p4().iter_mut() {
+            border_node.left = Val::Px(-600.0); // Move off-screen (400px width + margin)
+            border_node.top = Val::Px(-600.0);
         }
 
         // Reset secondary image display to show full image

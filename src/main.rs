@@ -1,6 +1,4 @@
-mod pdf;
 mod kornia;
-mod ice;
 mod bevy;
 
 fn main() {
