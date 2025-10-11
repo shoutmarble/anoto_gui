@@ -1,8 +1,3 @@
-pub mod bevy_hello;
-pub mod gui;
-pub mod image;
-pub mod magnifier;
-pub mod dialog;
-pub mod utils;
+pub mod main_gui;
 
-pub use bevy_hello::bevy_hello;
+pub use main_gui::bevy_hello;

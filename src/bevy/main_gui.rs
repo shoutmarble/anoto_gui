@@ -15,13 +15,6 @@ use bevy_ui_widgets::{
 use std::path::PathBuf;
 use image::{DynamicImage, GenericImageView, ImageReader};
 
-// Import our modules
-use crate::bevy::utils::*;
-use crate::bevy::gui::*;
-use crate::bevy::image::*;
-use crate::bevy::magnifier::*;
-use crate::bevy::dialog::*;
-
 /// Main function that sets up and runs the Bevy application
 pub fn bevy_hello() {
     App::new()
@@ -344,6 +337,7 @@ fn dialog_system(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_image_display(
     mut commands: Commands,
     mut selected_image: ResMut<SelectedImage>,
@@ -511,6 +505,7 @@ fn update_image_display(
         }
 }
 
+#[allow(clippy::type_complexity)]
 fn magnifier_system(
     mut commands: Commands,
     mut param_set: ParamSet<(
