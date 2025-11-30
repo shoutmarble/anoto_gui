@@ -1,9 +1,12 @@
 use bevy::{prelude::*, ui::widget::ImageNode};
+use bevy_ui_widgets::{Slider, SliderPrecision, SliderRange, SliderThumb, SliderValue};
 
 use crate::gui_app::{
     scaling::{ScaleRegion, ScaleToFit},
     state::ZoomSettings,
 };
+
+pub const ZOOM_SLIDER_HORIZONTAL_PADDING: f32 = 12.0;
 
 pub struct LayoutPlugin;
 
@@ -23,10 +26,10 @@ pub struct ZoomSquare;
 pub struct LoadImageButton;
 
 #[derive(Component)]
-pub struct ZoomSizer;
+pub struct ZoomSlider;
 
 #[derive(Component)]
-pub struct ZoomSizerLabel;
+pub struct ZoomSliderValue;
 
 #[derive(Component)]
 pub struct ZoomPreview;
@@ -163,37 +166,84 @@ fn spawn_right_panel(commands: &mut Commands) -> Entity {
 
             parent
                 .spawn((
-                    Button,
                     Node {
                         width: Val::Percent(80.0),
-                        height: Val::Px(72.0),
                         flex_direction: FlexDirection::Column,
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        row_gap: Val::Px(6.0),
+                        justify_content: JustifyContent::FlexStart,
+                        align_items: AlignItems::Stretch,
+                        row_gap: Val::Px(8.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.3, 0.3, 0.5)),
-                    ZoomSizer,
-                    Name::new("ZoomSizer"),
+                    Name::new("ZoomSliderPanel"),
                 ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text::new("scale"),
+                .with_children(|panel| {
+                    panel.spawn((
+                        Text::new("zoom scale slider"),
                         TextFont {
                             font_size: 18.0,
                             ..default()
                         },
                         TextColor(Color::WHITE),
                     ));
-                    parent.spawn((
-                        Text::new(format!("{:.0}px", ZoomSettings::default().square_size)),
+
+                    panel
+                        .spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(40.0),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::FlexStart,
+                                position_type: PositionType::Relative,
+                                padding: UiRect::horizontal(Val::Px(ZOOM_SLIDER_HORIZONTAL_PADDING)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.2, 0.2, 0.35)),
+                            BorderRadius::all(Val::Px(8.0)),
+                            Slider::default(),
+                            SliderRange::new(0.0, 100.0),
+                            SliderValue(ZoomSettings::default().slider_value()),
+                            SliderPrecision(3),
+                            ZoomSlider,
+                            Name::new("ZoomSlider"),
+                        ))
+                        .with_children(|slider| {
+                            slider.spawn((
+                                Node {
+                                    width: Val::Percent(100.0),
+                                    height: Val::Px(6.0),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.35, 0.35, 0.5)),
+                                BorderRadius::all(Val::Px(3.0)),
+                                Name::new("ZoomSliderTrack"),
+                            ));
+
+                            slider.spawn((
+                                Node {
+                                    width: Val::Px(18.0),
+                                    height: Val::Px(18.0),
+                                    position_type: PositionType::Absolute,
+                                    top: Val::Px(11.0),
+                                    left: Val::Px(0.0),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.8, 0.6, 1.0)),
+                                BorderColor::all(Color::srgb(0.6, 0.4, 1.0)),
+                                BorderRadius::all(Val::Px(9.0)),
+                                SliderThumb,
+                                Name::new("ZoomSliderThumb"),
+                            ));
+                        });
+
+                    panel.spawn((
+                        Text::new(format!("{:.0}%", ZoomSettings::default().slider_value())),
                         TextFont {
-                            font_size: 14.0,
+                            font_size: 16.0,
                             ..default()
                         },
-                        TextColor(Color::srgb(0.8, 0.8, 0.9)),
-                        ZoomSizerLabel,
+                        TextColor(Color::srgb(0.9, 0.9, 1.0)),
+                        ZoomSliderValue,
+                        Name::new("ZoomSliderValue"),
                     ));
                 });
 

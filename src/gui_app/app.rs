@@ -1,4 +1,5 @@
 use bevy::{prelude::*, window::{Window, WindowMode, WindowPlugin, WindowResolution}};
+use bevy_ui_widgets::SliderPlugin;
 
 use crate::gui_app::{
     layout::LayoutPlugin,
@@ -31,6 +32,7 @@ impl Plugin for GuiAppPlugin {
         .init_resource::<CursorState>()
         .add_message::<ImageLoadedEvent>()
         .add_message::<ZoomCapturedEvent>()
+        .add_plugins(SliderPlugin)
         .add_plugins((
             LayoutPlugin,
             LoaderPlugin,

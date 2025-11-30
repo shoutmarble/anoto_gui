@@ -1,31 +1,35 @@
 use bevy::{
-    input::mouse::{MouseScrollUnit, MouseWheel},
+    ecs::observer::On,
     prelude::*,
+    ui::ComputedNode,
     window::{PrimaryWindow, Window},
 };
+use bevy_ui_widgets::{slider_self_update, SliderRange, SliderThumb, SliderValue, ValueChange};
 use image::GenericImageView;
 
 use crate::gui_app::{
-    layout::{ZoomSizer, ZoomSizerLabel, ZoomSquare},
+    layout::{ZoomSlider, ZoomSliderValue, ZoomSquare, ZOOM_SLIDER_HORIZONTAL_PADDING},
     loader::push_dynamic_image,
-    state::{CursorState, GuiImageState, LayoutMetrics, ZoomCapturedEvent, ZoomSettings},
+    state::{CursorState, GuiImageState, ImageLoadedEvent, LayoutMetrics, ZoomCapturedEvent, ZoomSettings},
 };
 
 pub struct ZoomPlugin;
 
 impl Plugin for ZoomPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                track_cursor_position,
-                update_zoom_square,
-                handle_zoom_sizer_interaction,
-                respond_to_zoom_scroll,
-                refresh_zoom_label,
-                capture_zoom_preview,
-            ),
-        );
+        app.add_observer(slider_self_update)
+            .add_observer(handle_zoom_slider_change)
+            .add_systems(
+                Update,
+                (
+                    track_cursor_position,
+                    update_zoom_square,
+                    update_zoom_slider_thumb,
+                    update_zoom_slider_value_text,
+                    capture_zoom_preview,
+                    reset_zoom_slider_on_image_load,
+                ),
+            );
     }
 }
 
@@ -52,11 +56,8 @@ fn update_zoom_square(
     if metrics.is_changed() || zoom.is_changed() || cursor.is_changed() {
         if let Ok((mut node, mut visibility)) = square_query.single_mut() {
             if let (Some(rect), Some(cursor_pos)) = (metrics.image_rect, cursor.window_position) {
-                if rect.contains(cursor_pos) {
-                    let size = zoom
-                        .square_size
-                        .min(rect.width())
-                        .min(rect.height());
+                let size = square_size_for_rect(rect, &zoom);
+                if rect.contains(cursor_pos) && size > 0.0 {
                     let clamped_left = (cursor_pos.x - size * 0.5).clamp(rect.min.x, rect.max.x - size);
                     let clamped_bottom = (cursor_pos.y - size * 0.5).clamp(rect.min.y, rect.max.y - size);
                     let local_left = clamped_left - metrics.left_panel.min.x;
@@ -77,57 +78,64 @@ fn update_zoom_square(
     }
 }
 
-fn handle_zoom_sizer_interaction(
-    mut sizer: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<ZoomSizer>)>,
+fn update_zoom_slider_thumb(
+    slider_query: Query<(&Children, &SliderValue, &SliderRange, &ComputedNode), With<ZoomSlider>>,
+    mut thumbs: Query<(&ComputedNode, &mut Node), With<SliderThumb>>,
 ) {
-    for (interaction, mut color) in &mut sizer {
-        match *interaction {
-            Interaction::Pressed => *color = BackgroundColor(Color::srgb(0.45, 0.45, 0.65)),
-            Interaction::Hovered => *color = BackgroundColor(Color::srgb(0.4, 0.4, 0.6)),
-            Interaction::None => *color = BackgroundColor(Color::srgb(0.3, 0.3, 0.5)),
+    for (children, value, range, slider_node) in &slider_query {
+        let percent = range.thumb_position(value.0);
+        for child in children.iter() {
+            if let Ok((thumb_node, mut node)) = thumbs.get_mut(child) {
+                let usable_width = slider_node.content_size.x.max(0.0);
+                let travel = (usable_width - thumb_node.size().x).max(0.0);
+                node.left = Val::Px(ZOOM_SLIDER_HORIZONTAL_PADDING + travel * percent);
+            }
         }
     }
 }
 
-fn respond_to_zoom_scroll(
-    mut scroll_events: MessageReader<MouseWheel>,
-    sizer: Query<&Interaction, With<ZoomSizer>>,
-    mut zoom: ResMut<ZoomSettings>,
-) {
-    let hovered = sizer.iter().any(|interaction| match interaction {
-        Interaction::Hovered | Interaction::Pressed => true,
-        Interaction::None => false,
-    });
-
-    if !hovered {
-        for _ in scroll_events.read() {}
-        return;
-    }
-
-    let mut delta = 0.0_f32;
-    for event in scroll_events.read() {
-        let step = match event.unit {
-            MouseScrollUnit::Line => 12.0,
-            MouseScrollUnit::Pixel => 1.0,
-        };
-        delta += event.y * step as f32;
-    }
-
-    if delta.abs() > f32::EPSILON {
-        zoom.square_size = (zoom.square_size + delta).clamp(zoom.min_square, zoom.max_square);
-    }
-}
-
-fn refresh_zoom_label(
+fn update_zoom_slider_value_text(
     zoom: Res<ZoomSettings>,
-    mut labels: Query<&mut Text, With<ZoomSizerLabel>>,
+    mut labels: Query<&mut Text, With<ZoomSliderValue>>,
 ) {
     if !zoom.is_changed() {
         return;
     }
 
+    let percent = zoom.normalized_percent() * 100.0;
     for mut text in &mut labels {
-        text.0 = format!("{:.0}px", zoom.square_size);
+        text.0 = format!("{percent:.0}%");
+    }
+}
+
+fn handle_zoom_slider_change(
+    value_change: On<ValueChange<f32>>,
+    slider_query: Query<(), With<ZoomSlider>>,
+    mut zoom: ResMut<ZoomSettings>,
+) {
+    if slider_query.get(value_change.source).is_ok() {
+        zoom.apply_slider_value(value_change.value);
+    }
+}
+
+fn reset_zoom_slider_on_image_load(
+    mut events: MessageReader<ImageLoadedEvent>,
+    mut zoom: ResMut<ZoomSettings>,
+    slider_query: Query<Entity, With<ZoomSlider>>,
+    mut commands: Commands,
+) {
+    let mut reset = false;
+    for _ in events.read() {
+        zoom.reset_to_default();
+        reset = true;
+    }
+
+    if reset {
+        if let Some(slider_entity) = slider_query.iter().next() {
+            commands
+                .entity(slider_entity)
+                .insert(SliderValue(zoom.slider_value()));
+        }
     }
 }
 
@@ -158,7 +166,10 @@ fn capture_zoom_preview(
     };
 
     let display_size = Vec2::new(display_rect.width(), display_rect.height());
-    let square_display = zoom.square_size.min(display_size.x).min(display_size.y);
+    let square_display = square_size_for_rect(display_rect, &zoom);
+    if square_display <= 0.0 {
+        return;
+    }
     let clamped_left = (cursor_pos.x - square_display * 0.5).clamp(display_rect.min.x, display_rect.max.x - square_display);
     let clamped_bottom = (cursor_pos.y - square_display * 0.5).clamp(display_rect.min.y, display_rect.max.y - square_display);
 
@@ -180,5 +191,14 @@ fn capture_zoom_preview(
             handle,
             aspect_ratio,
         });
+    }
+}
+
+fn square_size_for_rect(rect: Rect, zoom: &ZoomSettings) -> f32 {
+    let min_dimension = rect.width().min(rect.height());
+    if min_dimension <= 0.0 {
+        0.0
+    } else {
+        zoom.normalized_percent() * min_dimension
     }
 }

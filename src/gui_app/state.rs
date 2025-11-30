@@ -50,18 +50,37 @@ pub struct LayoutMetrics {
 
 #[derive(Resource)]
 pub struct ZoomSettings {
-    pub square_size: f32,
-    pub min_square: f32,
-    pub max_square: f32,
+    pub square_percent: f32,
+    pub min_percent: f32,
+    pub max_percent: f32,
 }
 
 impl Default for ZoomSettings {
     fn default() -> Self {
         Self {
-            square_size: 160.0,
-            min_square: 60.0,
-            max_square: 320.0,
+            square_percent: 0.10,
+            min_percent: 0.0,
+            max_percent: 1.0,
         }
+    }
+}
+
+impl ZoomSettings {
+    pub fn normalized_percent(&self) -> f32 {
+        self.square_percent.clamp(self.min_percent, self.max_percent)
+    }
+
+    pub fn reset_to_default(&mut self) {
+        self.square_percent = Self::default().square_percent;
+    }
+
+    pub fn slider_value(&self) -> f32 {
+        self.normalized_percent() * 100.0
+    }
+
+    pub fn apply_slider_value(&mut self, slider_value: f32) {
+        let normalized = (slider_value / 100.0).clamp(self.min_percent, self.max_percent);
+        self.square_percent = normalized;
     }
 }
 
