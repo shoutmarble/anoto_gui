@@ -165,7 +165,12 @@ struct DialogState {
 
 fn setup(mut commands: Commands, assets: Res<AssetServer>) {
     // ui camera
-    commands.spawn(Camera2d);
+    commands.spawn((
+        Camera2d,
+        Camera {
+            ..default()
+        },
+    ));
     commands.spawn(demo_root(&assets));
 }
 
