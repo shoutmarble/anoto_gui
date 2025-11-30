@@ -34,7 +34,12 @@ fn track_cursor_position(
     mut cursor: ResMut<CursorState>,
 ) {
     if let Some(window) = windows.iter().next() {
-        cursor.window_position = window.cursor_position();
+        cursor.window_position = window.cursor_position().map(|mut position| {
+            // Convert from window (origin at top-left) to UI space (origin at bottom-left)
+            let window_height = window.size().y;
+            position.y = window_height - position.y;
+            position
+        });
     }
 }
 
