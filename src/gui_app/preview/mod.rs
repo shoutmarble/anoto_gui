@@ -12,13 +12,7 @@ pub struct PreviewPlugin;
 
 impl Plugin for PreviewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                apply_loaded_image,
-                apply_zoom_preview,
-            ),
-        );
+        app.add_systems(Update, (apply_loaded_image, apply_zoom_preview));
     }
 }
 

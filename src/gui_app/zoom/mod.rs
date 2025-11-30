@@ -1,17 +1,40 @@
 use bevy::{
     ecs::observer::On,
     prelude::*,
-    ui::ComputedNode,
     window::{PrimaryWindow, Window},
 };
-use bevy_ui_widgets::{slider_self_update, SliderRange, SliderThumb, SliderValue, ValueChange};
+use bevy_ui_widgets::{SliderRange, SliderValue, ValueChange, slider_self_update};
 use image::GenericImageView;
 
 use crate::gui_app::{
-    layout::{ZoomSlider, ZoomSliderValue, ZoomSquare, ZOOM_SLIDER_HORIZONTAL_PADDING},
+    layout::{ZoomSlider, ZoomSliderThumb, ZoomSliderTrack, ZoomSliderValue, ZoomSquare},
     loader::push_dynamic_image,
-    state::{CursorState, GuiImageState, ImageLoadedEvent, LayoutMetrics, ZoomCapturedEvent, ZoomSettings},
+    state::{
+        CursorState, GuiImageState, ImageLoadedEvent, LayoutMetrics, ZoomCapturedEvent,
+        ZoomSettings,
+    },
 };
+
+type SliderValueQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Children,
+        &'static SliderValue,
+        &'static SliderRange,
+    ),
+    (Changed<SliderValue>, With<ZoomSlider>),
+>;
+
+type SliderTrackQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Children, &'static Node),
+    (With<ZoomSliderTrack>, Without<ZoomSliderThumb>),
+>;
+
+type SliderThumbQuery<'w, 's> =
+    Query<'w, 's, &'static mut Node, (With<ZoomSliderThumb>, Without<ZoomSliderTrack>)>;
 
 pub struct ZoomPlugin;
 
@@ -24,12 +47,12 @@ impl Plugin for ZoomPlugin {
                 (
                     track_cursor_position,
                     update_zoom_square,
-                    update_zoom_slider_thumb,
                     update_zoom_slider_value_text,
                     capture_zoom_preview,
                     reset_zoom_slider_on_image_load,
                 ),
-            );
+            )
+            .add_systems(PostUpdate, update_zoom_slider_thumb);
     }
 }
 
@@ -53,42 +76,53 @@ fn update_zoom_square(
     cursor: Res<CursorState>,
     mut square_query: Query<(&mut Node, &mut Visibility), With<ZoomSquare>>,
 ) {
-    if metrics.is_changed() || zoom.is_changed() || cursor.is_changed() {
-        if let Ok((mut node, mut visibility)) = square_query.single_mut() {
-            if let (Some(rect), Some(cursor_pos)) = (metrics.image_rect, cursor.window_position) {
-                let size = square_size_for_rect(rect, &zoom);
-                if rect.contains(cursor_pos) && size > 0.0 {
-                    let clamped_left = (cursor_pos.x - size * 0.5).clamp(rect.min.x, rect.max.x - size);
-                    let clamped_bottom = (cursor_pos.y - size * 0.5).clamp(rect.min.y, rect.max.y - size);
-                    let local_left = clamped_left - metrics.left_panel.min.x;
-                    let local_bottom = clamped_bottom - metrics.left_panel.min.y;
+    if (metrics.is_changed() || zoom.is_changed() || cursor.is_changed())
+        && let Ok((mut node, mut visibility)) = square_query.single_mut()
+    {
+        if let (Some(rect), Some(cursor_pos)) = (metrics.image_rect, cursor.window_position) {
+            let size = square_size_for_rect(rect, &zoom);
+            if rect.contains(cursor_pos) && size > 0.0 {
+                let clamped_left = (cursor_pos.x - size * 0.5).clamp(rect.min.x, rect.max.x - size);
+                let clamped_bottom =
+                    (cursor_pos.y - size * 0.5).clamp(rect.min.y, rect.max.y - size);
+                let local_left = clamped_left - metrics.left_panel.min.x;
+                let local_bottom = clamped_bottom - metrics.left_panel.min.y;
 
-                    node.width = Val::Px(size);
-                    node.height = Val::Px(size);
-                    node.left = Val::Px(local_left);
-                    node.bottom = Val::Px(local_bottom);
-                    *visibility = Visibility::Visible;
-                } else {
-                    *visibility = Visibility::Hidden;
-                }
+                node.width = Val::Px(size);
+                node.height = Val::Px(size);
+                node.left = Val::Px(local_left);
+                node.bottom = Val::Px(local_bottom);
+                *visibility = Visibility::Visible;
             } else {
                 *visibility = Visibility::Hidden;
             }
+        } else {
+            *visibility = Visibility::Hidden;
         }
     }
 }
 
 fn update_zoom_slider_thumb(
-    slider_query: Query<(&Children, &SliderValue, &SliderRange, &ComputedNode), With<ZoomSlider>>,
-    mut thumbs: Query<(&ComputedNode, &mut Node), With<SliderThumb>>,
+    slider_query: SliderValueQuery<'_, '_>,
+    tracks: SliderTrackQuery<'_, '_>,
+    mut thumbs: SliderThumbQuery<'_, '_>,
 ) {
-    for (children, value, range, slider_node) in &slider_query {
-        let percent = range.thumb_position(value.0);
+    for (children, value, range) in &slider_query {
+        let normalized = range.thumb_position(value.0).clamp(0.0, 1.0);
+
         for child in children.iter() {
-            if let Ok((thumb_node, mut node)) = thumbs.get_mut(child) {
-                let usable_width = slider_node.content_size.x.max(0.0);
-                let travel = (usable_width - thumb_node.size().x).max(0.0);
-                node.left = Val::Px(ZOOM_SLIDER_HORIZONTAL_PADDING + travel * percent);
+            if let Ok((track_children, _)) = tracks.get(child) {
+                // Approximate the left position to account for thumb width
+                // Assuming track_width ≈ 500px, thumb_width = 18px, so scale by (1 - 18/500) ≈ 0.964
+                let scaled_normalized = normalized * 0.964;
+                let left_percent = scaled_normalized * 100.0;
+
+                for thumb_child in track_children.iter() {
+                    if let Ok(mut thumb_node) = thumbs.get_mut(thumb_child) {
+                        thumb_node.left = Val::Percent(left_percent);
+                    }
+                }
+                break; // Assume only one track per slider
             }
         }
     }
@@ -130,12 +164,10 @@ fn reset_zoom_slider_on_image_load(
         reset = true;
     }
 
-    if reset {
-        if let Some(slider_entity) = slider_query.iter().next() {
-            commands
-                .entity(slider_entity)
-                .insert(SliderValue(zoom.slider_value()));
-        }
+    if reset && let Some(slider_entity) = slider_query.iter().next() {
+        commands
+            .entity(slider_entity)
+            .insert(SliderValue(zoom.slider_value()));
     }
 }
 
@@ -170,18 +202,28 @@ fn capture_zoom_preview(
     if square_display <= 0.0 {
         return;
     }
-    let clamped_left = (cursor_pos.x - square_display * 0.5).clamp(display_rect.min.x, display_rect.max.x - square_display);
-    let clamped_bottom = (cursor_pos.y - square_display * 0.5).clamp(display_rect.min.y, display_rect.max.y - square_display);
+    let clamped_left = (cursor_pos.x - square_display * 0.5)
+        .clamp(display_rect.min.x, display_rect.max.x - square_display);
+    let clamped_bottom = (cursor_pos.y - square_display * 0.5)
+        .clamp(display_rect.min.y, display_rect.max.y - square_display);
 
     let rel_left = (clamped_left - display_rect.min.x) / display_size.x;
     let rel_bottom = (clamped_bottom - display_rect.min.y) / display_size.y;
 
     let (orig_w, orig_h) = original.dimensions();
-    let crop_w = ((square_display / display_size.x) * orig_w as f32).round().clamp(4.0, orig_w as f32) as u32;
-    let crop_h = ((square_display / display_size.y) * orig_h as f32).round().clamp(4.0, orig_h as f32) as u32;
+    let crop_w = ((square_display / display_size.x) * orig_w as f32)
+        .round()
+        .clamp(4.0, orig_w as f32) as u32;
+    let crop_h = ((square_display / display_size.y) * orig_h as f32)
+        .round()
+        .clamp(4.0, orig_h as f32) as u32;
 
-    let px_left = (rel_left * orig_w as f32).round().clamp(0.0, (orig_w - crop_w) as f32) as u32;
-    let px_bottom = (rel_bottom * orig_h as f32).round().clamp(0.0, (orig_h - crop_h) as f32) as u32;
+    let px_left = (rel_left * orig_w as f32)
+        .round()
+        .clamp(0.0, (orig_w - crop_w) as f32) as u32;
+    let px_bottom = (rel_bottom * orig_h as f32)
+        .round()
+        .clamp(0.0, (orig_h - crop_h) as f32) as u32;
     let px_top = orig_h.saturating_sub(px_bottom + crop_h);
 
     let sub_image = original.crop_imm(px_left, px_top, crop_w, crop_h);

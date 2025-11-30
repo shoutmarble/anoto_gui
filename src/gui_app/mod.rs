@@ -6,4 +6,4 @@ pub mod scaling;
 pub mod state;
 pub mod zoom;
 
-pub use app::{run_gui_app, GuiAppPlugin};
+pub use app::run_gui_app;

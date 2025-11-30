@@ -1,4 +1,4 @@
-pub mod histogram;
-pub mod greyscale;
 pub mod binarize;
+pub mod greyscale;
+pub mod histogram;
 pub mod image_proc;

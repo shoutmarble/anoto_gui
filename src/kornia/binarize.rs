@@ -21,7 +21,6 @@ pub fn binarize() -> Result<(), Box<dyn std::error::Error>> {
     // let image = F::read_image_any_rgb8(args.image_path)?;
     let image: Image<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/dots.png")?;
 
-    
     // binarize the image as u8
     let mut bin = Image::from_size_val(image.size(), 0)?;
     imgproc::threshold::threshold_binary(&image, &mut bin, 127, 255)?;

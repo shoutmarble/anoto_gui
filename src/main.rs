@@ -1,5 +1,5 @@
-mod kornia;
 mod gui_app;
+mod kornia;
 
 fn main() {
     println!("Anoto GUI!");

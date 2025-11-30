@@ -1,5 +1,8 @@
-use kornia::{image::{Image, ImageSize}, imgproc};
 use kornia::io::functional as F;
+use kornia::{
+    image::{Image, ImageSize},
+    imgproc,
+};
 
 #[allow(dead_code)]
 pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
@@ -9,7 +12,7 @@ pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
 
     let image_viz = image.clone();
 
-    let image_f32  = image.cast_and_scale::<f32>(1.0 / 255.0)?;
+    let image_f32 = image.cast_and_scale::<f32>(1.0 / 255.0)?;
 
     // convert the image to grayscale
     let mut gray = Image::from_size_val(image_f32.size(), 0.0)?;
@@ -23,7 +26,8 @@ pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut gray_resized = Image::from_size_val(new_size, 0.0)?;
     imgproc::resize::resize_native(
-        &gray, &mut gray_resized,
+        &gray,
+        &mut gray_resized,
         imgproc::interpolation::InterpolationMode::Bilinear,
     )?;
 

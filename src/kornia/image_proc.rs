@@ -2,10 +2,7 @@ use argh::FromArgs;
 use std::{fs, path::PathBuf};
 
 use kornia::io::functional as F;
-use kornia::{
-    image::Image,
-    imgproc,
-};
+use kornia::{image::Image, imgproc};
 
 #[derive(FromArgs)]
 #[allow(dead_code)]
@@ -98,22 +95,18 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
 
             // check 4-neighbors for background -> this pixel is on the boundary
             let mut is_edge = false;
-            if x > 0
-                && bin_slice[idx - 1] == 0 {
-                    is_edge = true;
-                }
-            if x + 1 < width_usize
-                && bin_slice[idx + 1] == 0 {
-                    is_edge = true;
-                }
-            if y > 0
-                && bin_slice[idx - width_usize] == 0 {
-                    is_edge = true;
-                }
-            if y + 1 < height_usize
-                && bin_slice[idx + width_usize] == 0 {
-                    is_edge = true;
-                }
+            if x > 0 && bin_slice[idx - 1] == 0 {
+                is_edge = true;
+            }
+            if x + 1 < width_usize && bin_slice[idx + 1] == 0 {
+                is_edge = true;
+            }
+            if y > 0 && bin_slice[idx - width_usize] == 0 {
+                is_edge = true;
+            }
+            if y + 1 < height_usize && bin_slice[idx + width_usize] == 0 {
+                is_edge = true;
+            }
 
             if is_edge {
                 edges_buf[idx] = 255u8;
@@ -150,7 +143,11 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
 
     // connected-component labeling (4-neighbour) to find each binary group's centroid
     let mut labels = vec![0usize; width_usize * height_usize];
-    let mut comps: Vec<(usize /*sum_x*/, usize /*sum_y*/, usize /*count*/)> = Vec::new();
+    let mut comps: Vec<(
+        usize, /*sum_x*/
+        usize, /*sum_y*/
+        usize, /*count*/
+    )> = Vec::new();
     let mut current_label = 1usize;
     for y in 0..height_usize {
         for x in 0..width_usize {
@@ -208,14 +205,16 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-            // debug: report number of components and first few centroids
-            eprintln!("found {} components", comps.len());
-            for (i, (sx, sy, cnt)) in comps.iter().enumerate().take(20) {
-                if *cnt == 0 { continue; }
-                let cx = (*sx as f32 / *cnt as f32).round() as i32;
-                let cy = (*sy as f32 / *cnt as f32).round() as i32;
-                eprintln!("comp {}: count={} centroid=({}, {})", i, cnt, cx, cy);
-            }
+    // debug: report number of components and first few centroids
+    eprintln!("found {} components", comps.len());
+    for (i, (sx, sy, cnt)) in comps.iter().enumerate().take(20) {
+        if *cnt == 0 {
+            continue;
+        }
+        let cx = (*sx as f32 / *cnt as f32).round() as i32;
+        let cy = (*sy as f32 / *cnt as f32).round() as i32;
+        eprintln!("comp {}: count={} centroid=({}, {})", i, cnt, cx, cy);
+    }
 
     // draw small filled red dots at each component, anchored to a pixel inside the component
     let dot_radius: i32 = 5; // increased for visibility
@@ -229,10 +228,18 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut cx = (*sum_x as f32 / *count as f32).round() as i32;
         let mut cy = (*sum_y as f32 / *count as f32).round() as i32;
-        if cx < 0 { cx = 0; }
-        if cy < 0 { cy = 0; }
-        if (cx as usize) >= width_usize { cx = (width_usize - 1) as i32; }
-        if (cy as usize) >= height_usize { cy = (height_usize - 1) as i32; }
+        if cx < 0 {
+            cx = 0;
+        }
+        if cy < 0 {
+            cy = 0;
+        }
+        if (cx as usize) >= width_usize {
+            cx = (width_usize - 1) as i32;
+        }
+        if (cy as usize) >= height_usize {
+            cy = (height_usize - 1) as i32;
+        }
 
         let label_id = label_idx + 1;
         let start_idx = (cy as usize) * width_usize + (cx as usize);
@@ -303,13 +310,19 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
             for dx in -dot_radius..=dot_radius {
                 let xx = cx + dx;
                 let yy = cy + dy;
-                if xx < 0 || yy < 0 { continue; }
+                if xx < 0 || yy < 0 {
+                    continue;
+                }
                 let dx2 = dx * dx;
                 let dy2 = dy * dy;
-                if dx2 + dy2 > dot_radius * dot_radius { continue; }
+                if dx2 + dy2 > dot_radius * dot_radius {
+                    continue;
+                }
                 let xui = xx as usize;
                 let yui = yy as usize;
-                if xui >= width_usize || yui >= height_usize { continue; }
+                if xui >= width_usize || yui >= height_usize {
+                    continue;
+                }
                 let i = yui * width_usize + xui;
                 overlay[3 * i] = 255u8;
                 overlay[3 * i + 1] = 0u8;
@@ -321,13 +334,19 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
     // create a debug image that draws each centroid in a distinct color (to verify count)
     let mut centroids_debug = vec![0u8; width_usize * height_usize * 3];
     for (label_idx, (sum_x, sum_y, count)) in comps.iter().enumerate() {
-        if *count == 0 { continue; }
+        if *count == 0 {
+            continue;
+        }
         let cx = (*sum_x as f32 / *count as f32).round() as i32;
         let cy = (*sum_y as f32 / *count as f32).round() as i32;
-        if cx < 0 || cy < 0 { continue; }
+        if cx < 0 || cy < 0 {
+            continue;
+        }
         let xui = cx as usize;
         let yui = cy as usize;
-        if xui >= width_usize || yui >= height_usize { continue; }
+        if xui >= width_usize || yui >= height_usize {
+            continue;
+        }
         let i = yui * width_usize + xui;
         // pick a color from a simple hash
         let idx = label_idx as u32;

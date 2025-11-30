@@ -6,7 +6,10 @@ pub struct ScalingPlugin;
 
 impl Plugin for ScalingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (store_window_metrics, apply_scale_constraints).chain());
+        app.add_systems(
+            Update,
+            (store_window_metrics, apply_scale_constraints).chain(),
+        );
     }
 }
 
@@ -47,7 +50,8 @@ fn store_window_metrics(
     }
 
     metrics.window_size = size;
-    metrics.left_panel = Rect::from_corners(Vec2::ZERO, Vec2::new(size.x * config.left_fraction, size.y));
+    metrics.left_panel =
+        Rect::from_corners(Vec2::ZERO, Vec2::new(size.x * config.left_fraction, size.y));
 }
 
 fn apply_scale_constraints(
@@ -59,10 +63,10 @@ fn apply_scale_constraints(
     let mut latest_image_rect = metrics.image_rect;
 
     for (mut node, mut scale) in &mut targets {
-        if matches!(scale.region, ScaleRegion::LeftPanelImage) {
-            if let Some(aspect) = gui_image.aspect_ratio {
-                scale.aspect_override = Some(aspect);
-            }
+        if matches!(scale.region, ScaleRegion::LeftPanelImage)
+            && let Some(aspect) = gui_image.aspect_ratio
+        {
+            scale.aspect_override = Some(aspect);
         }
 
         let target_rect = match scale.region {
@@ -106,6 +110,9 @@ fn apply_scale_constraints(
 fn preview_rect(metrics: &LayoutMetrics, config: &LayoutConfig) -> Rect {
     let left_edge = metrics.left_panel.max.x;
     let min = Vec2::new(left_edge + config.padding, config.padding);
-    let max = Vec2::new(metrics.window_size.x - config.padding, metrics.window_size.y * 0.45);
+    let max = Vec2::new(
+        metrics.window_size.x - config.padding,
+        metrics.window_size.y * 0.45,
+    );
     Rect::from_corners(min, max)
 }

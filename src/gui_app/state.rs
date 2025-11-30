@@ -27,7 +27,6 @@ impl GuiImageState {
 #[derive(Resource)]
 pub struct LayoutConfig {
     pub left_fraction: f32,
-    pub right_fraction: f32,
     pub padding: f32,
 }
 
@@ -35,7 +34,6 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             left_fraction: 0.65,
-            right_fraction: 0.35,
             padding: 24.0,
         }
     }
@@ -67,7 +65,8 @@ impl Default for ZoomSettings {
 
 impl ZoomSettings {
     pub fn normalized_percent(&self) -> f32 {
-        self.square_percent.clamp(self.min_percent, self.max_percent)
+        self.square_percent
+            .clamp(self.min_percent, self.max_percent)
     }
 
     pub fn reset_to_default(&mut self) {

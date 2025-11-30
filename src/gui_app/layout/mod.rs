@@ -1,5 +1,5 @@
 use bevy::{prelude::*, ui::widget::ImageNode};
-use bevy_ui_widgets::{Slider, SliderPrecision, SliderRange, SliderThumb, SliderValue};
+use bevy_ui_widgets::{Slider, SliderPrecision, SliderRange, SliderValue};
 
 use crate::gui_app::{
     scaling::{ScaleRegion, ScaleToFit},
@@ -27,6 +27,12 @@ pub struct LoadImageButton;
 
 #[derive(Component)]
 pub struct ZoomSlider;
+
+#[derive(Component)]
+pub struct ZoomSliderTrack;
+
+#[derive(Component)]
+pub struct ZoomSliderThumb;
 
 #[derive(Component)]
 pub struct ZoomSliderValue;
@@ -87,19 +93,18 @@ fn spawn_left_panel(commands: &mut Commands) -> Entity {
             Name::new("LeftPanel"),
         ))
         .with_children(|parent| {
-            parent
-                .spawn((
-                    Node {
-                        width: Val::Percent(90.0),
-                        height: Val::Percent(90.0),
-                        ..default()
-                    },
-                    BackgroundColor(Color::BLACK),
-                    ImageNode::default(),
-                    MainImage,
-                    ScaleToFit::new(ScaleRegion::LeftPanelImage),
-                    Name::new("MainImage"),
-                ));
+            parent.spawn((
+                Node {
+                    width: Val::Percent(90.0),
+                    height: Val::Percent(90.0),
+                    ..default()
+                },
+                BackgroundColor(Color::BLACK),
+                ImageNode::default(),
+                MainImage,
+                ScaleToFit::new(ScaleRegion::LeftPanelImage),
+                Name::new("MainImage"),
+            ));
 
             parent.spawn((
                 Node {
@@ -194,7 +199,9 @@ fn spawn_right_panel(commands: &mut Commands) -> Entity {
                                 align_items: AlignItems::Center,
                                 justify_content: JustifyContent::FlexStart,
                                 position_type: PositionType::Relative,
-                                padding: UiRect::horizontal(Val::Px(ZOOM_SLIDER_HORIZONTAL_PADDING)),
+                                padding: UiRect::horizontal(Val::Px(
+                                    ZOOM_SLIDER_HORIZONTAL_PADDING,
+                                )),
                                 ..default()
                             },
                             BackgroundColor(Color::srgb(0.2, 0.2, 0.35)),
@@ -207,32 +214,35 @@ fn spawn_right_panel(commands: &mut Commands) -> Entity {
                             Name::new("ZoomSlider"),
                         ))
                         .with_children(|slider| {
-                            slider.spawn((
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    height: Val::Px(6.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.35, 0.35, 0.5)),
-                                BorderRadius::all(Val::Px(3.0)),
-                                Name::new("ZoomSliderTrack"),
-                            ));
-
-                            slider.spawn((
-                                Node {
-                                    width: Val::Px(18.0),
-                                    height: Val::Px(18.0),
-                                    position_type: PositionType::Absolute,
-                                    top: Val::Px(11.0),
-                                    left: Val::Px(0.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.8, 0.6, 1.0)),
-                                BorderColor::all(Color::srgb(0.6, 0.4, 1.0)),
-                                BorderRadius::all(Val::Px(9.0)),
-                                SliderThumb,
-                                Name::new("ZoomSliderThumb"),
-                            ));
+                            slider
+                                .spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        height: Val::Px(6.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.35, 0.35, 0.5)),
+                                    BorderRadius::all(Val::Px(3.0)),
+                                    ZoomSliderTrack,
+                                    Name::new("ZoomSliderTrack"),
+                                ))
+                                .with_children(|track| {
+                                    track.spawn((
+                                        Node {
+                                            width: Val::Px(18.0),
+                                            height: Val::Px(18.0),
+                                            position_type: PositionType::Absolute,
+                                            top: Val::Px(-6.0), // Adjust to center vertically on the track
+                                            left: Val::Px(0.0),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgb(0.8, 0.6, 1.0)),
+                                        BorderColor::all(Color::srgb(0.6, 0.4, 1.0)),
+                                        BorderRadius::all(Val::Px(9.0)),
+                                        ZoomSliderThumb,
+                                        Name::new("ZoomSliderThumb"),
+                                    ));
+                                });
                         });
 
                     panel.spawn((

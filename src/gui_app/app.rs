@@ -1,4 +1,7 @@
-use bevy::{prelude::*, window::{Window, WindowMode, WindowPlugin, WindowResolution}};
+use bevy::{
+    prelude::*,
+    window::{Window, WindowMode, WindowPlugin, WindowResolution},
+};
 use bevy_ui_widgets::SliderPlugin;
 
 use crate::gui_app::{
@@ -6,7 +9,10 @@ use crate::gui_app::{
     loader::LoaderPlugin,
     preview::PreviewPlugin,
     scaling::ScalingPlugin,
-    state::{CursorState, GuiImageState, ImageLoadedEvent, LayoutConfig, LayoutMetrics, ZoomCapturedEvent, ZoomPreviewState, ZoomSettings},
+    state::{
+        CursorState, GuiImageState, ImageLoadedEvent, LayoutConfig, LayoutMetrics,
+        ZoomCapturedEvent, ZoomPreviewState, ZoomSettings,
+    },
     zoom::ZoomPlugin,
 };
 

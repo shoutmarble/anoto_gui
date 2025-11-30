@@ -1,6 +1,6 @@
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use bevy::asset::RenderAssetUsages;
 use image::{DynamicImage, GenericImageView};
 use rfd::FileDialog;
 
@@ -8,6 +8,13 @@ use crate::gui_app::{
     layout::LoadImageButton,
     state::{GuiImageState, ImageLoadedEvent},
 };
+
+type LoadButtonQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static mut BackgroundColor),
+    (Changed<Interaction>, With<LoadImageButton>),
+>;
 
 pub struct LoaderPlugin;
 
@@ -18,7 +25,7 @@ impl Plugin for LoaderPlugin {
 }
 
 fn handle_load_image_button(
-    mut buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<LoadImageButton>)>,
+    mut buttons: LoadButtonQuery<'_, '_>,
     mut images: ResMut<Assets<Image>>,
     mut gui_image: ResMut<GuiImageState>,
     mut loaded_writer: MessageWriter<ImageLoadedEvent>,
@@ -27,13 +34,15 @@ fn handle_load_image_button(
         match *interaction {
             Interaction::Pressed => {
                 *color = BackgroundColor(Color::srgb(0.6, 0.4, 1.0));
-                if let Some(path) = FileDialog::new().add_filter("image", &["png", "jpg", "jpeg"]).pick_file() {
-                    if let Ok(dynamic) = image::open(&path) {
-                        if let Some(handle) = push_dynamic_image(&dynamic, &mut images) {
-                            gui_image.set_image(dynamic, handle.clone());
-                            loaded_writer.write(ImageLoadedEvent { handle });
-                        }
-                    }
+                if let Some(path) = FileDialog::new()
+                    .add_filter("image", &["png", "jpg", "jpeg"])
+                    .pick_file()
+                    && let Ok(dynamic) = image::open(&path)
+                    && let Some(handle) = push_dynamic_image(&dynamic, &mut images)
+                {
+                    let display_handle = handle.clone();
+                    gui_image.set_image(dynamic, display_handle);
+                    loaded_writer.write(ImageLoadedEvent { handle });
                 }
             }
             Interaction::Hovered => {
@@ -46,7 +55,10 @@ fn handle_load_image_button(
     }
 }
 
-pub(crate) fn push_dynamic_image(dynamic: &DynamicImage, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+pub(crate) fn push_dynamic_image(
+    dynamic: &DynamicImage,
+    images: &mut Assets<Image>,
+) -> Option<Handle<Image>> {
     let rgba = dynamic.to_rgba8();
     let (width, height) = dynamic.dimensions();
     let extent = Extent3d {
