@@ -2,4 +2,4 @@
 
 This is a GUI Application to read Anoto Dot Paper.
 
-![Anoto Gui](assets\anoto_gui.png)
+![Anoto Gui](https://raw.githubusercontent.com/shoutmarble/anoto_gui/refs/heads/main/assets/85_60.png)
