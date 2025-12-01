@@ -58,13 +58,7 @@ fn apply_zoom_preview(
     }
 
     if let Ok(mut text) = arrow_text_query.single_mut() {
-        // Replace unicode arrows with ASCII for display since the default font might not support them
-        text.0 = event
-            .arrow_grid
-            .replace("←", "<")
-            .replace("↑", "^")
-            .replace("→", ">")
-            .replace("↓", "v");
+        text.0 = event.arrow_grid;
     }
 }
 

@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "anoto_gui"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "argh",
  "bevy",

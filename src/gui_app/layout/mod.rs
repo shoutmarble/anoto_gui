@@ -52,7 +52,7 @@ impl Plugin for LayoutPlugin {
     }
 }
 
-fn setup_ui_root(mut commands: Commands) {
+fn setup_ui_root(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         Camera2d,
         Camera {
@@ -77,7 +77,7 @@ fn setup_ui_root(mut commands: Commands) {
         .id();
 
     let left_panel = spawn_left_panel(&mut commands);
-    let right_panel = spawn_right_panel(&mut commands);
+    let right_panel = spawn_right_panel(&mut commands, &asset_server);
 
     commands.entity(root).add_child(left_panel);
     commands.entity(root).add_child(right_panel);
@@ -132,7 +132,7 @@ fn spawn_left_panel(commands: &mut Commands) -> Entity {
         .id()
 }
 
-fn spawn_right_panel(commands: &mut Commands) -> Entity {
+fn spawn_right_panel(commands: &mut Commands, asset_server: &Res<AssetServer>) -> Entity {
     commands
         .spawn((
             Node {
@@ -300,6 +300,8 @@ fn spawn_right_panel(commands: &mut Commands) -> Entity {
                     widget.spawn((
                         Text::new(""),
                         TextFont {
+                            font: asset_server
+                                .load("JetBrainsMono/fonts/ttf/JetBrainsMonoNL-Medium.ttf"),
                             font_size: 14.0,
                             ..default()
                         },
