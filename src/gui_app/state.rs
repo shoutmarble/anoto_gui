@@ -87,6 +87,7 @@ impl ZoomSettings {
 pub struct ZoomPreviewState {
     pub handle: Option<Handle<Image>>,
     pub aspect_ratio: Option<f32>,
+    pub arrow_grid: Option<String>,
 }
 
 #[derive(Resource, Default)]
@@ -103,4 +104,5 @@ pub struct ImageLoadedEvent {
 pub struct ZoomCapturedEvent {
     pub handle: Handle<Image>,
     pub aspect_ratio: f32,
+    pub arrow_grid: String,
 }

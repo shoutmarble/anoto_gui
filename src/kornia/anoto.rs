@@ -27,11 +27,13 @@ pub enum DetectionError {
     Kornia(#[from] ImageError),
 }
 
-pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, DetectionError> {
+pub fn annotate_anoto_dots(
+    source: &DynamicImage,
+) -> Result<(DynamicImage, String), DetectionError> {
     let rgb = source.to_rgb8();
     let (width, height) = rgb.dimensions();
     if width == 0 || height == 0 {
-        return Ok(source.clone());
+        return Ok((source.clone(), String::new()));
     }
 
     let raw_pixels = rgb.into_raw();
@@ -65,6 +67,7 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
         draw_ring(&mut canvas, dot.center, dot.radius, dot.color);
     }
 
+    let mut row_ys = Vec::new();
     let mut target_dots: Vec<&DotDetection> = components
         .iter()
         .filter(|d| d.color == COLOR_RED || d.color == COLOR_MAGENTA)
@@ -100,6 +103,7 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
 
         for row in rows {
             let avg_y: f32 = row.iter().map(|d| d.center.1).sum::<f32>() / row.len() as f32;
+            row_ys.push(avg_y);
             let y_i = avg_y.round() as i32;
             if y_i >= 0 && y_i < height as i32 {
                 for x in 0..width {
@@ -109,6 +113,7 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
         }
     }
 
+    let mut col_xs = Vec::new();
     let mut col_dots: Vec<&DotDetection> = components
         .iter()
         .filter(|d| d.color == COLOR_BLACK || d.color == COLOR_BLUE)
@@ -122,8 +127,7 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
     });
 
     if !col_dots.is_empty() {
-        let avg_radius =
-            col_dots.iter().map(|d| d.radius).sum::<f32>() / col_dots.len() as f32;
+        let avg_radius = col_dots.iter().map(|d| d.radius).sum::<f32>() / col_dots.len() as f32;
         let col_threshold = avg_radius * 3.0;
 
         let mut cols = Vec::new();
@@ -144,6 +148,7 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
 
         for col in cols {
             let avg_x: f32 = col.iter().map(|d| d.center.0).sum::<f32>() / col.len() as f32;
+            col_xs.push(avg_x);
             let x_i = avg_x.round() as i32;
             if x_i >= 0 && x_i < width as i32 {
                 for y in 0..height {
@@ -153,7 +158,44 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
         }
     }
 
-    Ok(DynamicImage::ImageRgba8(canvas))
+    let mut arrow_grid = String::new();
+    row_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    col_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    for &y in &row_ys {
+        for &x in &col_xs {
+            let mut min_dist_sq = f32::MAX;
+            let mut closest_dot = None;
+
+            for dot in &components {
+                let dx = dot.center.0 - x;
+                let dy = dot.center.1 - y;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                    closest_dot = Some(dot);
+                }
+            }
+
+            if let Some(dot) = closest_dot {
+                let dx = dot.center.0 - x;
+                let dy = dot.center.1 - y;
+                let arrow = if dx.abs() > dy.abs() {
+                    if dx > 0.0 { "→" } else { "←" }
+                } else {
+                    if dy > 0.0 { "↓" } else { "↑" }
+                };
+                arrow_grid.push_str(arrow);
+                arrow_grid.push(' ');
+            } else {
+                arrow_grid.push('?');
+                arrow_grid.push(' ');
+            }
+        }
+        arrow_grid.push('\n');
+    }
+
+    Ok((DynamicImage::ImageRgba8(canvas), arrow_grid))
 }
 
 fn ensure_foreground_convention(mask: &mut [u8]) {

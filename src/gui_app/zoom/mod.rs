@@ -228,9 +228,9 @@ fn capture_zoom_preview(
     let px_top = orig_h.saturating_sub(px_bottom + crop_h);
 
     let sub_image = original.crop_imm(px_left, px_top, crop_w, crop_h);
-    let preview_image = annotate_anoto_dots(&sub_image).unwrap_or_else(|err| {
+    let (preview_image, arrow_grid) = annotate_anoto_dots(&sub_image).unwrap_or_else(|err| {
         warn!("failed to annotate anoto dots: {err}");
-        sub_image.clone()
+        (sub_image.clone(), String::new())
     });
 
     if let Some(handle) = push_dynamic_image(&preview_image, &mut images) {
@@ -238,6 +238,7 @@ fn capture_zoom_preview(
         writer.write(ZoomCapturedEvent {
             handle,
             aspect_ratio,
+            arrow_grid,
         });
     }
 }

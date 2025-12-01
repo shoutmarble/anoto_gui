@@ -40,6 +40,12 @@ pub struct ZoomSliderValue;
 #[derive(Component)]
 pub struct ZoomPreview;
 
+#[derive(Component)]
+pub struct ArrowGridText;
+
+#[derive(Component)]
+pub struct DownloadArrowsButton;
+
 impl Plugin for LayoutPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_ui_root);
@@ -278,6 +284,55 @@ fn spawn_right_panel(commands: &mut Commands) -> Entity {
                 ScaleToFit::new(ScaleRegion::PreviewPanel),
                 Name::new("ZoomPreview"),
             ));
+
+            parent
+                .spawn((
+                    Node {
+                        width: Val::Percent(80.0),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: Val::Px(8.0),
+                        ..default()
+                    },
+                    Name::new("ArrowWidget"),
+                ))
+                .with_children(|widget| {
+                    widget.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: 14.0,
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                        ArrowGridText,
+                        Name::new("ArrowGridText"),
+                    ));
+
+                    widget
+                        .spawn((
+                            Button,
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(32.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.3, 0.5, 0.3)),
+                            DownloadArrowsButton,
+                            Name::new("DownloadArrowsButton"),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("save arrows"),
+                                TextFont {
+                                    font_size: 16.0,
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+                });
         })
         .id()
 }
