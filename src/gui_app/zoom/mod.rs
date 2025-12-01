@@ -14,6 +14,7 @@ use crate::gui_app::{
         ZoomSettings,
     },
 };
+use crate::kornia::anoto::annotate_anoto_dots;
 
 type SliderValueQuery<'w, 's> = Query<
     'w,
@@ -227,7 +228,12 @@ fn capture_zoom_preview(
     let px_top = orig_h.saturating_sub(px_bottom + crop_h);
 
     let sub_image = original.crop_imm(px_left, px_top, crop_w, crop_h);
-    if let Some(handle) = push_dynamic_image(&sub_image, &mut images) {
+    let preview_image = annotate_anoto_dots(&sub_image).unwrap_or_else(|err| {
+        warn!("failed to annotate anoto dots: {err}");
+        sub_image.clone()
+    });
+
+    if let Some(handle) = push_dynamic_image(&preview_image, &mut images) {
         let aspect_ratio = crop_w.max(1) as f32 / crop_h.max(1) as f32;
         writer.write(ZoomCapturedEvent {
             handle,

@@ -1,3 +1,4 @@
+pub mod anoto;
 pub mod binarize;
 pub mod greyscale;
 pub mod histogram;

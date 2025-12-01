@@ -1,6 +1,6 @@
 [package]
 name = "anoto_gui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -20,3 +20,4 @@ bevy_shader = "0.17.3"
 futures = "0.3"
 futures-lite = "2.0"
 bevy_ui_widgets = "0.17.3"
+thiserror = "1.0"
