@@ -65,6 +65,94 @@ pub fn annotate_anoto_dots(source: &DynamicImage) -> Result<DynamicImage, Detect
         draw_ring(&mut canvas, dot.center, dot.radius, dot.color);
     }
 
+    let mut target_dots: Vec<&DotDetection> = components
+        .iter()
+        .filter(|d| d.color == COLOR_RED || d.color == COLOR_MAGENTA)
+        .collect();
+
+    target_dots.sort_by(|a, b| {
+        a.center
+            .1
+            .partial_cmp(&b.center.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if !target_dots.is_empty() {
+        let avg_radius =
+            target_dots.iter().map(|d| d.radius).sum::<f32>() / target_dots.len() as f32;
+        let row_threshold = avg_radius * 3.0;
+
+        let mut rows = Vec::new();
+        let mut current_row: Vec<&DotDetection> = Vec::new();
+
+        for dot in target_dots {
+            if let Some(last) = current_row.last() {
+                if (dot.center.1 - last.center.1) > row_threshold {
+                    rows.push(current_row);
+                    current_row = Vec::new();
+                }
+            }
+            current_row.push(dot);
+        }
+        if !current_row.is_empty() {
+            rows.push(current_row);
+        }
+
+        for row in rows {
+            let avg_y: f32 = row.iter().map(|d| d.center.1).sum::<f32>() / row.len() as f32;
+            let y_i = avg_y.round() as i32;
+            if y_i >= 0 && y_i < height as i32 {
+                for x in 0..width {
+                    canvas.put_pixel(x, y_i as u32, COLOR_MAGENTA);
+                }
+            }
+        }
+    }
+
+    let mut col_dots: Vec<&DotDetection> = components
+        .iter()
+        .filter(|d| d.color == COLOR_BLACK || d.color == COLOR_BLUE)
+        .collect();
+
+    col_dots.sort_by(|a, b| {
+        a.center
+            .0
+            .partial_cmp(&b.center.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if !col_dots.is_empty() {
+        let avg_radius =
+            col_dots.iter().map(|d| d.radius).sum::<f32>() / col_dots.len() as f32;
+        let col_threshold = avg_radius * 3.0;
+
+        let mut cols = Vec::new();
+        let mut current_col: Vec<&DotDetection> = Vec::new();
+
+        for dot in col_dots {
+            if let Some(last) = current_col.last() {
+                if (dot.center.0 - last.center.0) > col_threshold {
+                    cols.push(current_col);
+                    current_col = Vec::new();
+                }
+            }
+            current_col.push(dot);
+        }
+        if !current_col.is_empty() {
+            cols.push(current_col);
+        }
+
+        for col in cols {
+            let avg_x: f32 = col.iter().map(|d| d.center.0).sum::<f32>() / col.len() as f32;
+            let x_i = avg_x.round() as i32;
+            if x_i >= 0 && x_i < width as i32 {
+                for y in 0..height {
+                    canvas.put_pixel(x_i as u32, y, COLOR_BLUE);
+                }
+            }
+        }
+    }
+
     Ok(DynamicImage::ImageRgba8(canvas))
 }
 
@@ -205,29 +293,50 @@ fn blend_centers(uniform: (f32, f32), weighted: (f32, f32)) -> (f32, f32) {
 
 fn draw_ring(canvas: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgba<u8>) {
     let (cx, cy) = center;
+    let radius = radius.max(2.0);
+    let stroke_width = 1.2;
+    let target_radius = radius - 0.5;
+
     let cx_i = cx.round() as i32;
     let cy_i = cy.round() as i32;
-    let radius = radius.max(2.0);
-    let r_outer = radius.ceil() as i32;
-    let r_inner = (radius - 1.0).max(0.0);
-    let r_inner_sq = (r_inner * r_inner) as i32;
-    let r_outer_sq = (radius * radius) as i32;
+    let max_r = (radius + 1.5).ceil() as i32;
+
     let width = canvas.width() as i32;
     let height = canvas.height() as i32;
 
-    for y in (cy_i - r_outer)..=(cy_i + r_outer) {
-        if y < 0 || y >= height {
-            continue;
-        }
-        for x in (cx_i - r_outer)..=(cx_i + r_outer) {
-            if x < 0 || x >= width {
-                continue;
-            }
-            let dx = x - cx_i;
-            let dy = y - cy_i;
-            let dist_sq = dx * dx + dy * dy;
-            if dist_sq <= r_outer_sq && dist_sq >= r_inner_sq {
-                canvas.put_pixel(x as u32, y as u32, color);
+    let min_x = (cx_i - max_r).max(0);
+    let max_x = (cx_i + max_r).min(width - 1);
+    let min_y = (cy_i - max_r).max(0);
+    let max_y = (cy_i + max_r).min(height - 1);
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            let dist_from_ring = (dist - target_radius).abs();
+            let half_stroke = stroke_width * 0.5;
+
+            if dist_from_ring < half_stroke + 0.5 {
+                let coverage = if dist_from_ring < half_stroke - 0.5 {
+                    1.0
+                } else {
+                    1.0 - (dist_from_ring - (half_stroke - 0.5))
+                };
+
+                let pixel = canvas.get_pixel_mut(x as u32, y as u32);
+                let bg = pixel.0;
+                let fg = color.0;
+
+                let alpha = (fg[3] as f32 / 255.0) * coverage;
+                let inv_alpha = 1.0 - alpha;
+
+                let r = (fg[0] as f32 * alpha + bg[0] as f32 * inv_alpha) as u8;
+                let g = (fg[1] as f32 * alpha + bg[1] as f32 * inv_alpha) as u8;
+                let b = (fg[2] as f32 * alpha + bg[2] as f32 * inv_alpha) as u8;
+
+                *pixel = Rgba([r, g, b, 255]);
             }
         }
     }
