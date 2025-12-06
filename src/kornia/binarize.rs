@@ -2,7 +2,12 @@ use argh::FromArgs;
 use std::path::PathBuf;
 
 use kornia::io::functional as F;
-use kornia::{image::Image, imgproc};
+use kornia::{
+    image::{Image, allocator::CpuAllocator},
+    imgproc,
+};
+
+type CpuImage<T, const C: usize> = Image<T, C, CpuAllocator>;
 
 #[derive(FromArgs)]
 #[allow(dead_code)]
@@ -19,21 +24,23 @@ pub fn binarize() -> Result<(), Box<dyn std::error::Error>> {
 
     // read the image
     // let image = F::read_image_any_rgb8(args.image_path)?;
-    let image: Image<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/dots.png")?;
+    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/dots.png")?;
 
     // binarize the image as u8
-    let mut bin = Image::from_size_val(image.size(), 0)?;
+    let mut bin: CpuImage<u8, 3> = Image::from_size_val(image.size(), 0, CpuAllocator::default())?;
     imgproc::threshold::threshold_binary(&image, &mut bin, 127, 255)?;
 
     // normalize the image between 0 and 1
     let image_f32 = image.cast_and_scale::<f32>(1.0 / 255.0)?;
 
     // convert to grayscale as floating point
-    let mut gray = Image::from_size_val(image_f32.size(), 0.0)?;
+    let mut gray: CpuImage<f32, 1> =
+        Image::from_size_val(image_f32.size(), 0.0, CpuAllocator::default())?;
     imgproc::color::gray_from_rgb(&image_f32, &mut gray)?;
 
     // binarize the gray image as floating point
-    let mut gray_bin = Image::from_size_val(gray.size(), 0.0)?;
+    let mut gray_bin: CpuImage<f32, 1> =
+        Image::from_size_val(gray.size(), 0.0, CpuAllocator::default())?;
     imgproc::threshold::threshold_binary(&gray, &mut gray_bin, 0.5, 1.0)?;
 
     // create a Rerun recording stream

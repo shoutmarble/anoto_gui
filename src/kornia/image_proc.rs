@@ -2,7 +2,12 @@ use argh::FromArgs;
 use std::{fs, path::PathBuf};
 
 use kornia::io::functional as F;
-use kornia::{image::Image, imgproc};
+use kornia::{
+    image::{Image, allocator::CpuAllocator},
+    imgproc,
+};
+
+type CpuImage<T, const C: usize> = Image<T, C, CpuAllocator>;
 
 #[derive(FromArgs)]
 #[allow(dead_code)]
@@ -16,18 +21,19 @@ struct Args {
 #[allow(dead_code)]
 pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
     // read the image from the assets (hard-coded path)
-    let image = F::read_image_any_rgb8("src/kornia/assets/anoto_dots.png")?;
+    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/anoto_dots.png")?;
 
     // ensure output directory exists
     let out_dir = PathBuf::from("output");
     fs::create_dir_all(&out_dir)?;
 
     // convert the image to grayscale
-    let mut gray: Image<u8, 1> = Image::from_size_val(image.size(), 0)?;
+    let mut gray: CpuImage<u8, 1> = Image::from_size_val(image.size(), 0, CpuAllocator::default())?;
     imgproc::color::gray_from_rgb_u8(&image, &mut gray)?;
 
     // binarize the image (simple fixed-threshold)
-    let mut binary: Image<u8, 1> = Image::from_size_val(image.size(), 0)?;
+    let mut binary: CpuImage<u8, 1> =
+        Image::from_size_val(image.size(), 0, CpuAllocator::default())?;
     imgproc::threshold::threshold_binary(&gray, &mut binary, 128, 255)?;
 
     // save the binarized image to output/binary.png

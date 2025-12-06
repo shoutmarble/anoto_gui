@@ -1,10 +1,14 @@
+#![allow(dead_code)]
+
 use std::{collections::VecDeque, f32::consts::PI};
 
 use image::{DynamicImage, Rgba, RgbaImage};
 use kornia::{
-    image::{Image, ImageError, ImageSize},
+    image::{Image, ImageError, ImageSize, allocator::CpuAllocator},
     imgproc,
 };
+
+type CpuImage<T, const C: usize> = Image<T, C, CpuAllocator>;
 
 const MIN_COMPONENT_PIXELS: usize = 3;
 const MAX_COMPONENT_PIXELS: usize = 250;
@@ -14,6 +18,38 @@ const COLOR_RED: Rgba<u8> = Rgba([220, 60, 60, 255]);
 const COLOR_BLUE: Rgba<u8> = Rgba([60, 110, 220, 255]);
 const COLOR_MAGENTA: Rgba<u8> = Rgba([210, 70, 210, 255]);
 
+/// Configuration parameters for Anoto dot detection.
+///
+/// Controls detection thresholds, component size filters, and color classification
+/// for identifying and categorizing dots in Anoto dot paper images.
+#[derive(Debug, Clone)]
+pub struct AnotoConfig {
+    pub min_component_pixels: usize,
+    pub max_component_pixels: usize,
+    pub centrality_threshold: f32,
+    pub color_black: Rgba<u8>,
+    pub color_red: Rgba<u8>,
+    pub color_blue: Rgba<u8>,
+    pub color_magenta: Rgba<u8>,
+}
+
+impl Default for AnotoConfig {
+    fn default() -> Self {
+        Self {
+            min_component_pixels: MIN_COMPONENT_PIXELS,
+            max_component_pixels: MAX_COMPONENT_PIXELS,
+            centrality_threshold: CENTRALITY_THRESHOLD,
+            color_black: COLOR_BLACK,
+            color_red: COLOR_RED,
+            color_blue: COLOR_BLUE,
+            color_magenta: COLOR_MAGENTA,
+        }
+    }
+}
+
+/// Represents a detected dot in an Anoto pattern.
+///
+/// Contains the dot's center coordinates, radius, and classified color.
 #[derive(Debug)]
 pub struct DotDetection {
     pub center: (f32, f32),
@@ -21,14 +57,36 @@ pub struct DotDetection {
     pub color: Rgba<u8>,
 }
 
+/// Errors that can occur during Anoto dot detection.
 #[derive(Debug, thiserror::Error)]
 pub enum DetectionError {
     #[error("kornia image error: {0}")]
     Kornia(#[from] ImageError),
 }
 
+/// Detects and annotates Anoto dots in an image.
+///
+/// This function processes an image to identify Anoto dot patterns, classifies them
+/// by color, and returns an annotated version with visual overlays plus a grid
+/// representation of the detected pattern.
+///
+/// # Arguments
+///
+/// * `source` - The input image to process
+/// * `config` - Detection configuration parameters
+///
+/// # Returns
+///
+/// Returns a tuple containing:
+/// * The annotated image with detected dots highlighted
+/// * A string representation of the arrow grid pattern
+///
+/// # Errors
+///
+/// Returns `DetectionError` if image processing fails.
 pub fn annotate_anoto_dots(
     source: &DynamicImage,
+    config: &AnotoConfig,
 ) -> Result<(DynamicImage, String), DetectionError> {
     let rgb = source.to_rgb8();
     let (width, height) = rgb.dimensions();
@@ -37,19 +95,20 @@ pub fn annotate_anoto_dots(
     }
 
     let raw_pixels = rgb.into_raw();
-    let image = Image::<u8, 3>::new(
+    let image = CpuImage::<u8, 3>::new(
         ImageSize {
             width: width as usize,
             height: height as usize,
         },
         raw_pixels.clone(),
+        CpuAllocator::default(),
     )?;
 
-    let mut gray = Image::<u8, 1>::from_size_val(image.size(), 0u8)?;
+    let mut gray = CpuImage::<u8, 1>::from_size_val(image.size(), 0u8, CpuAllocator::default())?;
     imgproc::color::gray_from_rgb_u8(&image, &mut gray)?;
 
     let threshold = otsu_threshold(gray.as_slice());
-    let mut binary = Image::<u8, 1>::from_size_val(gray.size(), 0u8)?;
+    let mut binary = CpuImage::<u8, 1>::from_size_val(gray.size(), 0u8, CpuAllocator::default())?;
     imgproc::threshold::threshold_binary(&gray, &mut binary, threshold, 255)?;
 
     let mut mask = binary.as_slice().to_vec();
@@ -61,6 +120,7 @@ pub fn annotate_anoto_dots(
         &raw_pixels,
         width as usize,
         height as usize,
+        config,
     );
     let mut canvas: RgbaImage = source.to_rgba8();
     for dot in components.iter() {
@@ -70,7 +130,7 @@ pub fn annotate_anoto_dots(
     let mut row_ys = Vec::new();
     let mut target_dots: Vec<&DotDetection> = components
         .iter()
-        .filter(|d| d.color == COLOR_RED || d.color == COLOR_MAGENTA)
+        .filter(|d| d.color == config.color_red || d.color == config.color_magenta)
         .collect();
 
     target_dots.sort_by(|a, b| {
@@ -107,7 +167,7 @@ pub fn annotate_anoto_dots(
             let y_i = avg_y.round() as i32;
             if y_i >= 0 && y_i < height as i32 {
                 for x in 0..width {
-                    canvas.put_pixel(x, y_i as u32, COLOR_MAGENTA);
+                    canvas.put_pixel(x, y_i as u32, config.color_magenta);
                 }
             }
         }
@@ -116,7 +176,7 @@ pub fn annotate_anoto_dots(
     let mut col_xs = Vec::new();
     let mut col_dots: Vec<&DotDetection> = components
         .iter()
-        .filter(|d| d.color == COLOR_BLACK || d.color == COLOR_BLUE)
+        .filter(|d| d.color == config.color_black || d.color == config.color_blue)
         .collect();
 
     col_dots.sort_by(|a, b| {
@@ -152,7 +212,7 @@ pub fn annotate_anoto_dots(
             let x_i = avg_x.round() as i32;
             if x_i >= 0 && x_i < width as i32 {
                 for y in 0..height {
-                    canvas.put_pixel(x_i as u32, y, COLOR_BLUE);
+                    canvas.put_pixel(x_i as u32, y, config.color_blue);
                 }
             }
         }
@@ -182,8 +242,10 @@ pub fn annotate_anoto_dots(
                 let dy = dot.center.1 - y;
                 let arrow = if dx.abs() > dy.abs() {
                     if dx > 0.0 { "→" } else { "←" }
+                } else if dy > 0.0 {
+                    "↓"
                 } else {
-                    if dy > 0.0 { "↓" } else { "↑" }
+                    "↑"
                 };
                 arrow_grid.push_str(arrow);
                 arrow_grid.push(' ');
@@ -214,6 +276,7 @@ fn extract_components(
     rgb: &[u8],
     width: usize,
     height: usize,
+    config: &AnotoConfig,
 ) -> Vec<DotDetection> {
     let mut visited = vec![false; mask.len()];
     let mut out = Vec::new();
@@ -280,7 +343,7 @@ fn extract_components(
             }
         }
 
-        if !(MIN_COMPONENT_PIXELS..=MAX_COMPONENT_PIXELS).contains(&count) {
+        if !(config.min_component_pixels..=config.max_component_pixels).contains(&count) {
             continue;
         }
 
@@ -293,12 +356,12 @@ fn extract_components(
         } else {
             uniform_center
         };
-        let center = blend_centers(uniform_center, weighted_center);
+        let center = blend_centers(uniform_center, weighted_center, config.centrality_threshold);
         let radius = ((count as f32) / PI).sqrt().max(1.5) * 1.35 + 1.5;
         let mean_r = sum_r as f32 / count as f32;
         let mean_g = sum_g as f32 / count as f32;
         let mean_b = sum_b as f32 / count as f32;
-        let color = classify_color(mean_r, mean_g, mean_b);
+        let color = classify_color(mean_r, mean_g, mean_b, config);
         out.push(DotDetection {
             center,
             radius,
@@ -309,21 +372,21 @@ fn extract_components(
     out
 }
 
-fn classify_color(r: f32, g: f32, b: f32) -> Rgba<u8> {
+fn classify_color(r: f32, g: f32, b: f32, config: &AnotoConfig) -> Rgba<u8> {
     if r < 70.0 && g < 70.0 && b < 70.0 {
-        COLOR_BLACK
+        config.color_black
     } else if r > 190.0 && b < 120.0 && r - g > 40.0 {
-        COLOR_RED
+        config.color_red
     } else if b > 190.0 && r < 150.0 && b - g > 30.0 {
-        COLOR_BLUE
+        config.color_blue
     } else {
-        COLOR_MAGENTA
+        config.color_magenta
     }
 }
 
-fn blend_centers(uniform: (f32, f32), weighted: (f32, f32)) -> (f32, f32) {
+fn blend_centers(uniform: (f32, f32), weighted: (f32, f32), threshold: f32) -> (f32, f32) {
     let shift = ((weighted.0 - uniform.0).abs() + (weighted.1 - uniform.1).abs()) * 0.5;
-    if shift > CENTRALITY_THRESHOLD {
+    if shift > threshold {
         weighted
     } else {
         (
