@@ -101,14 +101,14 @@ pub fn annotate_anoto_dots(
             height: height as usize,
         },
         raw_pixels.clone(),
-        CpuAllocator::default(),
+        CpuAllocator,
     )?;
 
-    let mut gray = CpuImage::<u8, 1>::from_size_val(image.size(), 0u8, CpuAllocator::default())?;
+    let mut gray = CpuImage::<u8, 1>::from_size_val(image.size(), 0u8, CpuAllocator)?;
     imgproc::color::gray_from_rgb_u8(&image, &mut gray)?;
 
     let threshold = otsu_threshold(gray.as_slice());
-    let mut binary = CpuImage::<u8, 1>::from_size_val(gray.size(), 0u8, CpuAllocator::default())?;
+    let mut binary = CpuImage::<u8, 1>::from_size_val(gray.size(), 0u8, CpuAllocator)?;
     imgproc::threshold::threshold_binary(&gray, &mut binary, threshold, 255)?;
 
     let mut mask = binary.as_slice().to_vec();
@@ -149,11 +149,11 @@ pub fn annotate_anoto_dots(
         let mut current_row: Vec<&DotDetection> = Vec::new();
 
         for dot in target_dots {
-            if let Some(last) = current_row.last() {
-                if (dot.center.1 - last.center.1) > row_threshold {
-                    rows.push(current_row);
-                    current_row = Vec::new();
-                }
+            if let Some(last) = current_row.last()
+                && (dot.center.1 - last.center.1) > row_threshold
+            {
+                rows.push(current_row);
+                current_row = Vec::new();
             }
             current_row.push(dot);
         }
@@ -194,11 +194,11 @@ pub fn annotate_anoto_dots(
         let mut current_col: Vec<&DotDetection> = Vec::new();
 
         for dot in col_dots {
-            if let Some(last) = current_col.last() {
-                if (dot.center.0 - last.center.0) > col_threshold {
-                    cols.push(current_col);
-                    current_col = Vec::new();
-                }
+            if let Some(last) = current_col.last()
+                && (dot.center.0 - last.center.0) > col_threshold
+            {
+                cols.push(current_col);
+                current_col = Vec::new();
             }
             current_col.push(dot);
         }

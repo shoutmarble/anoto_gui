@@ -18,7 +18,7 @@ pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
 
     // convert the image to grayscale
     let mut gray: CpuImage<f32, 1> =
-        Image::from_size_val(image_f32.size(), 0.0, CpuAllocator::default())?;
+        Image::from_size_val(image_f32.size(), 0.0, CpuAllocator)?;
     imgproc::color::gray_from_rgb(&image_f32, &mut gray)?;
 
     // resize the image
@@ -28,7 +28,7 @@ pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut gray_resized: CpuImage<f32, 1> =
-        Image::from_size_val(new_size, 0.0, CpuAllocator::default())?;
+        Image::from_size_val(new_size, 0.0, CpuAllocator)?;
     imgproc::resize::resize_native(
         &gray,
         &mut gray_resized,

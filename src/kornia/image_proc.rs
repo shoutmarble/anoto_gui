@@ -28,12 +28,12 @@ pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&out_dir)?;
 
     // convert the image to grayscale
-    let mut gray: CpuImage<u8, 1> = Image::from_size_val(image.size(), 0, CpuAllocator::default())?;
+    let mut gray: CpuImage<u8, 1> = Image::from_size_val(image.size(), 0, CpuAllocator)?;
     imgproc::color::gray_from_rgb_u8(&image, &mut gray)?;
 
     // binarize the image (simple fixed-threshold)
     let mut binary: CpuImage<u8, 1> =
-        Image::from_size_val(image.size(), 0, CpuAllocator::default())?;
+        Image::from_size_val(image.size(), 0, CpuAllocator)?;
     imgproc::threshold::threshold_binary(&gray, &mut binary, 128, 255)?;
 
     // save the binarized image to output/binary.png
