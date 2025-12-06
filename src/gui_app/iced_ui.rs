@@ -1,9 +1,6 @@
 use iced::mouse::Cursor;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Program, Stroke, event};
-use iced::widget::scrollable::{
-    self as scrollables, AbsoluteOffset, Direction, RelativeOffset, Scrollbar,
-};
-use iced::widget::{button, column, container, pane_grid, scrollable, text};
+use iced::widget::{button, column, container, pane_grid, stack, text};
 use iced::{
     Color, Element, Length, Point, Rectangle, Size, Subscription, Task, Theme, Vector, mouse,
     window,
@@ -14,9 +11,9 @@ pub fn run_iced_app() -> iced::Result {
     iced::application("Anoto Dot Reader", AnotoApp::update, AnotoApp::view)
         .subscription(AnotoApp::subscription)
         .theme(AnotoApp::theme)
-        .antialiasing(true)
+        .antialiasing(false)
         .window(window::Settings {
-            size: Size::new(1280.0, 720.0),
+            size: Size::new(640.0, 380.0),
             ..Default::default()
         })
         .run_with(AnotoApp::new)
@@ -37,6 +34,7 @@ enum Message {
     ImageLoaded(Result<LoadedImage, String>),
     Viewer(ViewerEvent),
     PaneResized(pane_grid::ResizeEvent),
+    RegionSizeChanged(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,28 +45,22 @@ enum Pane {
 
 #[derive(Debug, Clone)]
 enum ViewerEvent {
-    Dragged {
-        displacement: Vector,
+    Pan {
+        offset: Vector,
         bounds: Size,
-        start_offset: AbsoluteOffset,
-        cursor: Option<Point>,
-        offset: AbsoluteOffset,
     },
     Zoom {
         factor: f32,
-        cursor: Option<Point>,
+        cursor: Point,
         bounds: Size,
     },
     Reset,
-    ViewportChanged {
-        size: Size,
-        offset: AbsoluteOffset,
-    },
+    ToggleDebug,
     Hover {
-        cursor: Option<Point>,
+        cursor: Point,
         bounds: Size,
-        offset: AbsoluteOffset,
     },
+    Leave,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +141,10 @@ impl AnotoApp {
                 self.panes.resize(event.split, event.ratio);
                 Task::none()
             }
+            Message::RegionSizeChanged(size) => {
+                self.viewer.set_region_size(size);
+                Task::none()
+            }
         }
     }
 
@@ -164,40 +160,32 @@ impl AnotoApp {
     }
 
     fn viewer_section(&self) -> Element<'_, Message> {
-        let content_size = self.viewer.content_size();
-        let viewer_canvas = Canvas::new(&self.viewer)
-            .width(Length::Fixed(content_size.width.max(1.0)))
-            .height(Length::Fixed(content_size.height.max(1.0)));
-
-        let viewer_scrollable = scrollable(viewer_canvas)
-            .id(self.viewer.scroll_id())
-            .direction(Direction::Both {
-                vertical: Scrollbar::default(),
-                horizontal: Scrollbar::default(),
-            })
-            .on_scroll(|viewport| {
-                let bounds = viewport.bounds();
-                let offset = viewport.absolute_offset();
-                Message::Viewer(ViewerEvent::ViewportChanged {
-                    size: bounds.size(),
-                    offset,
-                })
-            })
+        // Use Stack to layer: image canvas on bottom, overlay canvas on top
+        // Both canvases share the same viewer state for coordinates
+        let image_canvas = Canvas::new(ImageLayer(&self.viewer))
             .width(Length::Fill)
             .height(Length::Fill);
 
-        container(viewer_scrollable)
+        let overlay_canvas = Canvas::new(OverlayLayer(&self.viewer))
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // Stack them: image first (bottom), then overlay (top)
+        let stacked = stack![
+            container(image_canvas)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true),
+            overlay_canvas
+        ];
+
+        container(stacked)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(1)
+            .padding(0)
             .clip(true)
             .style(|_| container::Style {
                 background: Some(Color::from_rgb8(24, 24, 24).into()),
-                border: iced::border::Border {
-                    color: Color::from_rgb8(60, 60, 60),
-                    width: 1.0,
-                    ..Default::default()
-                },
                 ..Default::default()
             })
             .into()
@@ -218,6 +206,11 @@ impl AnotoApp {
             .width(Length::Fill)
             .into();
 
+        let debug_button: Element<'_, Message> = button("Toggle Debug")
+            .on_press(Message::Viewer(ViewerEvent::ToggleDebug))
+            .width(Length::Fill)
+            .into();
+
         let zoom_label: Element<'_, Message> = text(self.viewer.zoom_label()).size(16).into();
 
         let status_label: Element<'_, Message> = text(&self.status_text).size(14).into();
@@ -233,30 +226,79 @@ impl AnotoApp {
                 .size(14)
                 .into();
 
-        let mut controls = column![open_button, fit_button, zoom_label, status_label]
-            .spacing(16)
-            .width(Length::Fill);
+        let region_size_label: Element<'_, Message> = text(format!(
+            "AOI Size: {}px",
+            self.viewer.region_size()
+        ))
+        .size(14)
+        .into();
+
+        let region_size_slider: Element<'_, Message> = iced::widget::slider(
+            ImageViewer::MIN_REGION_SIZE..=self.viewer.max_region_size().max(ImageViewer::MIN_REGION_SIZE),
+            self.viewer.region_size(),
+            Message::RegionSizeChanged,
+        )
+        .width(Length::Fill)
+        .into();
+
+        let mut controls = column![
+            open_button,
+            fit_button,
+            debug_button,
+            zoom_label,
+            status_label,
+            region_size_label,
+            region_size_slider
+        ]
+        .spacing(16)
+        .width(Length::Fill);
 
         if let Some(label) = last_loaded {
             controls = controls.push(label);
         }
 
-        let preview_title: Element<'_, Message> = text("Preview").size(14).into();
+        // Helper function to create a legend-style frame
+        let legend_style = |_: &_| container::Style {
+            background: None,
+            border: iced::border::Border {
+                color: Color::from_rgb8(100, 100, 100),
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        };
+
+        // Wrap controls in a "Controls" legend
+        let controls_legend: Element<'_, Message> = column![
+            container(
+                text(" Controls ").size(12)
+            )
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb8(32, 32, 32).into()),
+                ..Default::default()
+            }),
+            container(controls.push(instructions))
+                .padding(10)
+                .style(legend_style)
+        ]
+        .spacing(0)
+        .into();
 
         let preview_content: Element<'_, Message> =
             if let Some(handle) = self.viewer.preview_handle() {
+                // Use aspect_ratio container to maintain square shape
                 container(
                     iced::widget::image(handle.clone())
-                        .width(Length::Fixed(self.viewer.preview_display_size()))
-                        .height(Length::Fixed(self.viewer.preview_display_size())),
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .content_fit(iced::ContentFit::Fill), // Fill the square container
                 )
                 .width(Length::Fill)
-                .padding(8)
                 .style(|_| container::Style {
-                    background: Some(Color::from_rgb8(20, 20, 20).into()),
+                    background: Some(Color::WHITE.into()),
                     border: iced::border::Border {
-                        color: Color::from_rgb8(70, 70, 70),
-                        width: 1.0,
+                        color: Color::from_rgb(1.0, 0.0, 1.0), // Magenta to match AOI
+                        width: 3.0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -278,12 +320,31 @@ impl AnotoApp {
                     .into()
             };
 
-        let controls = controls
-            .push(instructions)
-            .push(preview_title)
-            .push(preview_content);
+        // Wrap preview in a "Preview" legend
+        let preview_legend: Element<'_, Message> = column![
+            container(
+                text(" Preview ").size(12)
+            )
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb8(32, 32, 32).into()),
+                ..Default::default()
+            }),
+            container(preview_content)
+                .padding(10)
+                .width(Length::Fill)
+                .style(legend_style)
+        ]
+        .spacing(0)
+        .into();
 
-        container(controls)
+        let all_controls = column![
+            controls_legend,
+            preview_legend
+        ]
+        .spacing(16)
+        .width(Length::Fill);
+
+        container(all_controls)
             .width(Length::Fixed(260.0))
             .padding(20)
             .style(|_| container::Style {
@@ -309,15 +370,26 @@ struct ImageViewer {
     zoom_mode: ZoomMode,
     custom_scale: f32,
     max_zoom_factor: f32,
-    viewport_size: Option<Size>,
-    scroll_id: scrollables::Id,
-    scroll_offset: AbsoluteOffset,
+
+    // View state
+    offset: Vector, // Pan offset
+    viewport_size: Size,
+    show_debug: bool,
+
+    // Caches
+    image_cache: canvas::Cache,
+    overlay_cache: canvas::Cache,
+
+    // Cropped image cache for clipping
+    cropped_handle: Option<iced::widget::image::Handle>,
+    cropped_dest: Rectangle,
+
     pixels: Option<Vec<u8>>,
     hover_viewport_pos: Option<Point>,
     hover_image_pos: Option<Point>,
     hover_overlay_center: Option<Point>,
     preview_handle: Option<iced::widget::image::Handle>,
-    pending_scroll: Option<AbsoluteOffset>,
+    region_size: u32, // Source pixels for AOI overlay and preview
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -335,23 +407,25 @@ impl Default for ImageViewer {
             zoom_mode: ZoomMode::Fit,
             custom_scale: 1.0,
             max_zoom_factor: 8.0,
-            viewport_size: None,
-            scroll_id: scrollables::Id::unique(),
-            scroll_offset: AbsoluteOffset { x: 0.0, y: 0.0 },
+            offset: Vector::new(0.0, 0.0),
+            viewport_size: Size::new(0.0, 0.0),
+            show_debug: true,
+            image_cache: canvas::Cache::default(),
+            overlay_cache: canvas::Cache::default(),
+            cropped_handle: None,
+            cropped_dest: Rectangle::new(Point::ORIGIN, Size::ZERO),
             pixels: None,
             hover_viewport_pos: None,
             hover_image_pos: None,
             hover_overlay_center: None,
             preview_handle: None,
-            pending_scroll: None,
+            region_size: 40,
         }
     }
 }
 
 impl ImageViewer {
-    const OVERLAY_SCREEN_SIZE: f32 = 120.0;
-    const PREVIEW_DIMENSION: u32 = 160;
-    const PREVIEW_DISPLAY_SIZE: f32 = 200.0;
+    const MIN_REGION_SIZE: u32 = 10;
 
     fn set_image(&mut self, handle: iced::widget::image::Handle, size: Size, pixels: Vec<u8>) {
         self.image = Some(handle);
@@ -359,248 +433,230 @@ impl ImageViewer {
         self.image_dimensions = (size.width.round() as u32, size.height.round() as u32);
         self.zoom_mode = ZoomMode::Fit;
         self.custom_scale = 1.0;
-        self.viewport_size = None;
-        self.scroll_id = scrollables::Id::unique();
-        self.scroll_offset = AbsoluteOffset { x: 0.0, y: 0.0 };
+        self.offset = Vector::new(0.0, 0.0);
         self.pixels = Some(pixels);
         self.hover_viewport_pos = None;
         self.hover_image_pos = None;
         self.hover_overlay_center = None;
         self.preview_handle = None;
-        self.pending_scroll = None;
+        self.cropped_handle = None;
+        self.cropped_dest = Rectangle::new(Point::ORIGIN, Size::ZERO);
+        self.invalidate_image_layer();
+    }
+
+    fn invalidate_image_layer(&mut self) {
+        self.image_cache.clear();
+        self.update_cropped_cache();
+    }
+
+    fn update_cropped_cache(&mut self) {
+        // Clear existing cache
+        self.cropped_handle = None;
+        self.cropped_dest = Rectangle::new(Point::ORIGIN, Size::ZERO);
+
+        let Some(pixels) = &self.pixels else { return };
+        if self.image.is_none() || self.viewport_size.width <= 0.0 {
+            return;
+        }
+
+        let scale = self.current_scale(self.viewport_size);
+        let bounds = self.viewport_size;
+
+        // Calculate full image bounds in screen space
+        let img_left = self.offset.x;
+        let img_top = self.offset.y;
+        let img_width = self.image_size.width * scale;
+        let img_height = self.image_size.height * scale;
+
+        // Check if clipping is needed
+        let needs_clip = img_left < 0.0
+            || img_top < 0.0
+            || img_left + img_width > bounds.width
+            || img_top + img_height > bounds.height;
+
+        if !needs_clip {
+            return; // Will use full image directly
+        }
+
+        let (img_w, img_h) = self.image_dimensions;
+
+        // Calculate visible region
+        let vis_left = img_left.max(0.0);
+        let vis_top = img_top.max(0.0);
+        let vis_right = (img_left + img_width).min(bounds.width);
+        let vis_bottom = (img_top + img_height).min(bounds.height);
+
+        if vis_right <= vis_left || vis_bottom <= vis_top {
+            return;
+        }
+
+        // Calculate source pixel coordinates
+        let src_left = ((vis_left - img_left) / scale).floor() as u32;
+        let src_top = ((vis_top - img_top) / scale).floor() as u32;
+        let src_right = (((vis_right - img_left) / scale).ceil() as u32).min(img_w);
+        let src_bottom = (((vis_bottom - img_top) / scale).ceil() as u32).min(img_h);
+
+        let crop_w = src_right.saturating_sub(src_left);
+        let crop_h = src_bottom.saturating_sub(src_top);
+
+        if crop_w == 0 || crop_h == 0 {
+            return;
+        }
+
+        // Extract visible pixels
+        let mut cropped = Vec::with_capacity((crop_w * crop_h * 4) as usize);
+        for y in src_top..src_bottom {
+            let start = ((y * img_w + src_left) * 4) as usize;
+            let end = ((y * img_w + src_right) * 4) as usize;
+            if end <= pixels.len() {
+                cropped.extend_from_slice(&pixels[start..end]);
+            }
+        }
+
+        self.cropped_handle = Some(iced::widget::image::Handle::from_rgba(crop_w, crop_h, cropped));
+
+        // Calculate destination rectangle
+        let dest_x = img_left + (src_left as f32 * scale);
+        let dest_y = img_top + (src_top as f32 * scale);
+        self.cropped_dest = Rectangle::new(
+            Point::new(dest_x, dest_y),
+            Size::new(crop_w as f32 * scale, crop_h as f32 * scale),
+        );
+    }
+
+    fn clamp_offset(&self, offset: Vector, viewport: Size, scale: f32) -> Vector {
+        let image_width = self.image_size.width * scale;
+        let image_height = self.image_size.height * scale;
+        let viewport_width = viewport.width;
+        let viewport_height = viewport.height;
+
+        let (min_x, max_x) = if image_width <= viewport_width {
+            let center = (viewport_width - image_width) / 2.0;
+            (center, center)
+        } else {
+            (viewport_width - image_width, 0.0)
+        };
+
+        let (min_y, max_y) = if image_height <= viewport_height {
+            let center = (viewport_height - image_height) / 2.0;
+            (center, center)
+        } else {
+            (viewport_height - image_height, 0.0)
+        };
+
+        Vector::new(offset.x.clamp(min_x, max_x), offset.y.clamp(min_y, max_y))
     }
 
     fn handle_event(&mut self, event: ViewerEvent) -> Task<Message> {
         match event {
-            ViewerEvent::Dragged {
-                displacement,
-                bounds,
-                start_offset,
-                cursor,
-                offset,
-            } => {
-                self.pending_scroll = None;
-                let viewport = self.viewport_size.unwrap_or(bounds);
-                let mut task = Task::none();
-                self.scroll_offset = offset;
-                let effective_offset = if self.image.is_some() {
-                    let scale = self.current_scale(viewport);
-                    let content_width = self.image_size.width * scale;
-                    let content_height = self.image_size.height * scale;
-
-                    if content_width > viewport.width + f32::EPSILON
-                        || content_height > viewport.height + f32::EPSILON
-                    {
-                        let max_offset_x = (content_width - viewport.width).max(0.0);
-                        let max_offset_y = (content_height - viewport.height).max(0.0);
-
-                        let target_offset = AbsoluteOffset {
-                            x: (start_offset.x - displacement.x).clamp(0.0, max_offset_x),
-                            y: (start_offset.y - displacement.y).clamp(0.0, max_offset_y),
-                        };
-
-                        let delta = AbsoluteOffset {
-                            x: target_offset.x - self.scroll_offset.x,
-                            y: target_offset.y - self.scroll_offset.y,
-                        };
-
-                        if delta.x.abs() > f32::EPSILON || delta.y.abs() > f32::EPSILON {
-                            self.scroll_offset = target_offset;
-                            task = scrollables::scroll_by::<Message>(self.scroll_id.clone(), delta);
-                        }
-
-                        self.scroll_offset
-                    } else {
-                        self.scroll_offset
-                    }
-                } else {
-                    self.scroll_offset
-                };
-
-                self.set_hover(cursor, viewport, effective_offset);
-                task
+            ViewerEvent::Pan { offset, bounds } => {
+                let _ = self.apply_viewport_resize(bounds);
+                if self.image.is_none() {
+                    return Task::none();
+                }
+                let scale = self.current_scale(bounds);
+                self.offset = self.clamp_offset(offset, bounds, scale);
+                self.invalidate_image_layer();
+                Task::none()
             }
             ViewerEvent::Zoom {
                 factor,
                 cursor,
                 bounds,
             } => {
-                let viewport = self.viewport_size.unwrap_or(bounds);
-                if let Some(cursor) = cursor {
-                    self.hover_viewport_pos = Some(cursor);
+                let _ = self.apply_viewport_resize(bounds);
+                if self.image.is_none() {
+                    return Task::none();
                 }
-                let task = self.apply_zoom(factor, cursor, viewport);
-                self.refresh_hover(viewport, self.scroll_offset);
-                task
+
+                let current_scale = self.current_scale(bounds);
+                let new_scale = current_scale * factor;
+
+                let fit_scale = self.compute_fit_scale(bounds);
+                let max_scale = fit_scale * self.max_zoom_factor;
+                let clamped_scale = new_scale.clamp(fit_scale, max_scale);
+
+                if (clamped_scale - fit_scale).abs() < 0.001 {
+                    self.zoom_mode = ZoomMode::Fit;
+                    self.custom_scale = 1.0;
+                    self.offset = self.center_offset(bounds, fit_scale);
+                } else {
+                    self.zoom_mode = ZoomMode::Custom;
+                    self.custom_scale = clamped_scale;
+
+                    let scale_ratio = clamped_scale / current_scale;
+
+                    let raw_offset = Vector::new(
+                        cursor.x - (cursor.x - self.offset.x) * scale_ratio,
+                        cursor.y - (cursor.y - self.offset.y) * scale_ratio,
+                    );
+
+                    self.offset = self.clamp_offset(raw_offset, bounds, clamped_scale);
+                }
+
+                self.invalidate_image_layer();
+                self.refresh_hover();
+                Task::none()
             }
             ViewerEvent::Reset => {
-                self.clear_hover();
-                self.reset_view()
-            }
-            ViewerEvent::ViewportChanged { size, offset } => {
-                self.viewport_size = Some(size);
-                let mut task = Task::none();
-
-                if self.image.is_some() {
-                    let scale = self.current_scale(size);
-                    let content_width = self.image_size.width * scale;
-                    let content_height = self.image_size.height * scale;
-                    let max_offset_x = (content_width - size.width).max(0.0);
-                    let max_offset_y = (content_height - size.height).max(0.0);
-
-                    self.scroll_offset = AbsoluteOffset {
-                        x: offset.x.clamp(0.0, max_offset_x),
-                        y: offset.y.clamp(0.0, max_offset_y),
-                    };
-
-                    if let Some(target) = self.pending_scroll {
-                        let dx = (self.scroll_offset.x - target.x).abs();
-                        let dy = (self.scroll_offset.y - target.y).abs();
-
-                        if dx < 1.0 && dy < 1.0 {
-                            self.pending_scroll = None;
-                        } else {
-                            let clamped_target_x = target.x.clamp(0.0, max_offset_x);
-                            let clamped_target_y = target.y.clamp(0.0, max_offset_y);
-
-                            let delta = AbsoluteOffset {
-                                x: clamped_target_x - self.scroll_offset.x,
-                                y: clamped_target_y - self.scroll_offset.y,
-                            };
-
-                            if delta.x.abs() > 1.0 || delta.y.abs() > 1.0 {
-                                task = scrollables::scroll_by::<Message>(self.scroll_id.clone(), delta);
-                            } else {
-                                self.pending_scroll = None;
-                            }
-                        }
-                    }
+                self.zoom_mode = ZoomMode::Fit;
+                self.custom_scale = 1.0;
+                if self.viewport_size.width > 0.0 && self.viewport_size.height > 0.0 {
+                    let scale = self.compute_fit_scale(self.viewport_size);
+                    self.offset = self.center_offset(self.viewport_size, scale);
                 } else {
-                    self.scroll_offset = AbsoluteOffset { x: 0.0, y: 0.0 };
-                    self.pending_scroll = None;
+                    self.offset = Vector::new(0.0, 0.0);
                 }
-
-                self.refresh_hover(size, self.scroll_offset);
-                task
+                self.invalidate_image_layer();
+                self.refresh_hover();
+                Task::none()
             }
-            ViewerEvent::Hover {
-                cursor,
-                bounds,
-                offset,
-            } => {
-                self.scroll_offset = offset;
-                self.set_hover(cursor, bounds, offset);
+            ViewerEvent::ToggleDebug => {
+                self.show_debug = !self.show_debug;
+                Task::none()
+            }
+            ViewerEvent::Hover { cursor, bounds } => {
+                let _ = self.apply_viewport_resize(bounds);
+                self.hover_viewport_pos = Some(cursor);
+                self.refresh_hover();
+                Task::none()
+            }
+            ViewerEvent::Leave => {
+                self.hover_viewport_pos = None;
+                self.hover_image_pos = None;
+                self.hover_overlay_center = None;
+                self.preview_handle = None;
                 Task::none()
             }
         }
     }
 
-    fn reset_view(&mut self) -> Task<Message> {
-        self.clear_hover();
-        self.zoom_mode = ZoomMode::Fit;
-        self.custom_scale = 1.0;
-        self.scroll_offset = AbsoluteOffset { x: 0.0, y: 0.0 };
-        self.pending_scroll = None;
-        scrollables::snap_to::<Message>(self.scroll_id.clone(), RelativeOffset { x: 0.0, y: 0.0 })
-    }
+    fn apply_viewport_resize(&mut self, new_size: Size) -> bool {
+        let size_changed = (self.viewport_size.width - new_size.width).abs() > f32::EPSILON
+            || (self.viewport_size.height - new_size.height).abs() > f32::EPSILON;
 
-    fn apply_zoom(&mut self, factor: f32, cursor: Option<Point>, viewport: Size) -> Task<Message> {
-        if self.image.is_none() {
-            return Task::none();
+        if !size_changed {
+            return false;
         }
 
-        let fit_scale = self.compute_fit_scale(viewport);
-        if fit_scale <= 0.0 {
-            return Task::none();
-        }
+        self.viewport_size = new_size;
 
-        let previous_scale = match self.zoom_mode {
-            ZoomMode::Fit => fit_scale,
-            ZoomMode::Custom => self.custom_scale,
-        };
-
-        let target_scale =
-            (previous_scale * factor).clamp(fit_scale, fit_scale * self.max_zoom_factor);
-
-        if (target_scale - fit_scale).abs() < 0.001 {
-            self.zoom_mode = ZoomMode::Fit;
-            self.custom_scale = 1.0;
-            self.scroll_offset = AbsoluteOffset { x: 0.0, y: 0.0 };
-            return scrollables::snap_to::<Message>(
-                self.scroll_id.clone(),
-                RelativeOffset { x: 0.0, y: 0.0 },
-            );
-        }
-
-        self.zoom_mode = ZoomMode::Custom;
-        self.custom_scale = target_scale;
-
-        let content_size = Size::new(
-            (self.image_size.width * target_scale).max(1.0),
-            (self.image_size.height * target_scale).max(1.0),
-        );
-
-        let max_offset_x = (content_size.width - viewport.width).max(0.0);
-        let max_offset_y = (content_size.height - viewport.height).max(0.0);
-
-        if let Some(focus) = cursor {
-            let previous_translation = self.compute_translation(viewport, previous_scale);
-            let mut content_point = Point::new(
-                self.scroll_offset.x + focus.x - previous_translation.x,
-                self.scroll_offset.y + focus.y - previous_translation.y,
-            );
-            content_point.x = content_point.x.max(0.0);
-            content_point.y = content_point.y.max(0.0);
-
-            let mut image_point = if previous_scale > 0.0 {
-                Point::new(
-                    content_point.x / previous_scale,
-                    content_point.y / previous_scale,
-                )
-            } else {
-                Point::new(0.0, 0.0)
-            };
-
-            image_point.x = image_point.x.clamp(0.0, self.image_size.width.max(0.0));
-            image_point.y = image_point.y.clamp(0.0, self.image_size.height.max(0.0));
-
-            let new_translation = self.compute_translation(viewport, target_scale);
-            let desired_content = Point::new(
-                image_point.x * target_scale + new_translation.x,
-                image_point.y * target_scale + new_translation.y,
-            );
-
-            let target_offset = AbsoluteOffset {
-                x: (desired_content.x - focus.x).clamp(0.0, max_offset_x),
-                y: (desired_content.y - focus.y).clamp(0.0, max_offset_y),
-            };
-
-            let delta = AbsoluteOffset {
-                x: target_offset.x - self.scroll_offset.x,
-                y: target_offset.y - self.scroll_offset.y,
-            };
-
-            if delta.x.abs() > f32::EPSILON || delta.y.abs() > f32::EPSILON {
-                self.scroll_offset = target_offset;
-                self.pending_scroll = Some(target_offset);
-                scrollables::scroll_by::<Message>(self.scroll_id.clone(), delta)
-            } else {
-                self.pending_scroll = None;
-                Task::none()
+        if self.image.is_some() {
+            match self.zoom_mode {
+                ZoomMode::Fit => {
+                    let fit_scale = self.compute_fit_scale(new_size);
+                    self.offset = self.center_offset(new_size, fit_scale);
+                }
+                ZoomMode::Custom => {
+                    let scale = self.current_scale(new_size);
+                    self.offset = self.clamp_offset(self.offset, new_size, scale);
+                }
             }
-        } else {
-            let centered_offset = AbsoluteOffset {
-                x: (max_offset_x / 2.0).max(0.0),
-                y: (max_offset_y / 2.0).max(0.0),
-            };
 
-            self.scroll_offset = centered_offset;
-
-            scrollables::snap_to::<Message>(
-                self.scroll_id.clone(),
-                RelativeOffset { x: 0.5, y: 0.5 },
-            )
+            self.invalidate_image_layer();
         }
+
+        true
     }
 
     fn compute_fit_scale(&self, viewport: Size) -> f32 {
@@ -620,109 +676,60 @@ impl ImageViewer {
         }
     }
 
-    fn compute_translation(&self, viewport: Size, scale: f32) -> Vector {
+    fn center_offset(&self, viewport: Size, scale: f32) -> Vector {
         let scaled_width = self.image_size.width * scale;
         let scaled_height = self.image_size.height * scale;
 
-        let translate_x = if scaled_width < viewport.width {
-            (viewport.width - scaled_width) / 2.0
-        } else {
-            0.0
-        };
+        let x = (viewport.width - scaled_width) / 2.0;
+        let y = (viewport.height - scaled_height) / 2.0;
 
-        let translate_y = if scaled_height < viewport.height {
-            (viewport.height - scaled_height) / 2.0
-        } else {
-            0.0
-        };
-
-        Vector::new(translate_x, translate_y)
+        Vector::new(x, y)
     }
 
     fn zoom_label(&self) -> String {
-        match self.viewport_size {
-            Some(viewport) => {
-                let percent = self.current_scale(viewport) * 100.0;
-                if matches!(self.zoom_mode, ZoomMode::Fit) {
-                    format!("Zoom: {:.0}% (Fit)", percent)
-                } else {
-                    format!("Zoom: {:.0}%", percent)
-                }
+        if self.viewport_size.width > 0.0 {
+            let percent = self.current_scale(self.viewport_size) * 100.0;
+            if matches!(self.zoom_mode, ZoomMode::Fit) {
+                format!("Zoom: {:.0}% (Fit)", percent)
+            } else {
+                format!("Zoom: {:.0}%", percent)
             }
-            None => "Zoom: --".to_string(),
-        }
-    }
-
-    fn content_size(&self) -> Size {
-        if self.image.is_none() {
-            return Size::new(1.0, 1.0);
-        }
-
-        let scale = if let Some(viewport) = self.viewport_size {
-            self.current_scale(viewport)
         } else {
-            match self.zoom_mode {
-                ZoomMode::Fit => 1.0,
-                ZoomMode::Custom => self.custom_scale,
-            }
-        };
-
-        Size::new(
-            (self.image_size.width * scale).max(1.0),
-            (self.image_size.height * scale).max(1.0),
-        )
-    }
-
-    fn scroll_id(&self) -> scrollables::Id {
-        self.scroll_id.clone()
+            "Zoom: --".to_string()
+        }
     }
 
     fn preview_handle(&self) -> Option<&iced::widget::image::Handle> {
         self.preview_handle.as_ref()
     }
 
-    fn preview_display_size(&self) -> f32 {
-        Self::PREVIEW_DISPLAY_SIZE
+    fn region_size(&self) -> u32 {
+        self.region_size
     }
 
-    fn clear_hover(&mut self) {
-        self.hover_viewport_pos = None;
-        self.hover_image_pos = None;
-        self.hover_overlay_center = None;
-        self.preview_handle = None;
-    }
-
-    fn set_hover(&mut self, cursor: Option<Point>, viewport: Size, offset: AbsoluteOffset) {
-        if self.image.is_none() {
-            self.clear_hover();
-            return;
+    fn set_region_size(&mut self, size: u32) {
+        let max = self.max_region_size();
+        self.region_size = size.clamp(Self::MIN_REGION_SIZE, max);
+        // Refresh preview with new region size
+        if let Some(image_point) = self.hover_image_pos {
+            self.update_preview(image_point);
         }
+    }
 
-        self.hover_viewport_pos = cursor;
-
-        if cursor.is_some() {
-            self.project_hover(viewport, offset);
+    fn max_region_size(&self) -> u32 {
+        let (w, h) = self.image_dimensions;
+        if w == 0 || h == 0 {
+            Self::MIN_REGION_SIZE
         } else {
+            w.min(h)
+        }
+    }
+
+    fn refresh_hover(&mut self) {
+        if self.image.is_none() {
             self.hover_image_pos = None;
             self.hover_overlay_center = None;
             self.preview_handle = None;
-        }
-    }
-
-    fn refresh_hover(&mut self, viewport: Size, offset: AbsoluteOffset) {
-        if self.image.is_none() {
-            self.clear_hover();
-            return;
-        }
-
-        if self.hover_viewport_pos.is_some() {
-            self.project_hover(viewport, offset);
-        }
-    }
-
-    fn project_hover(&mut self, viewport: Size, offset: AbsoluteOffset) {
-        if self.image.is_none() {
-            self.clear_hover();
             return;
         }
 
@@ -733,26 +740,25 @@ impl ImageViewer {
             return;
         };
 
-        let scale = self.current_scale(viewport);
-        if scale <= 0.0 {
-            self.hover_image_pos = None;
-            self.hover_overlay_center = None;
-            self.preview_handle = None;
+        let viewport = self.viewport_size;
+        if viewport.width <= 0.0 || viewport.height <= 0.0 {
             return;
         }
 
-        let translation = self.compute_translation(viewport, scale);
-        let scaled_width = self.image_size.width * scale;
-        let scaled_height = self.image_size.height * scale;
+        let scale = self.current_scale(viewport);
+        if scale <= 0.0 {
+            return;
+        }
 
-        // cursor is already in content coordinates
-        let content_pos = cursor;
-        let relative = Point::new(content_pos.x - translation.x, content_pos.y - translation.y);
+        let image_x = (cursor.x - self.offset.x) / scale;
+        let image_y = (cursor.y - self.offset.y) / scale;
 
-        if relative.x < -0.5
-            || relative.y < -0.5
-            || relative.x > scaled_width + 0.5
-            || relative.y > scaled_height + 0.5
+        let image_point = Point::new(image_x, image_y);
+
+        if image_x < 0.0
+            || image_y < 0.0
+            || image_x > self.image_size.width
+            || image_y > self.image_size.height
         {
             self.hover_image_pos = None;
             self.hover_overlay_center = None;
@@ -760,41 +766,81 @@ impl ImageViewer {
             return;
         }
 
-        let mut clamped_relative = relative;
-        clamped_relative.x = clamped_relative.x.clamp(0.0, scaled_width);
-        clamped_relative.y = clamped_relative.y.clamp(0.0, scaled_height);
-
-        let mut image_point = Point::new(clamped_relative.x / scale, clamped_relative.y / scale);
-        image_point.x = image_point.x.clamp(0.0, self.image_size.width.max(0.0));
-        image_point.y = image_point.y.clamp(0.0, self.image_size.height.max(0.0));
-
         self.hover_image_pos = Some(image_point);
-        
-        // Calculate center in content coordinates
-        let center = Point::new(
-            clamped_relative.x + translation.x,
-            clamped_relative.y + translation.y,
-        );
-        
-        // Clamp to viewport in content coordinates
-        let half = Self::OVERLAY_SCREEN_SIZE / 2.0;
-        
-        let min_x = offset.x + half;
-        let max_x = (offset.x + viewport.width - half).max(min_x);
-        
-        let min_y = offset.y + half;
-        let max_y = (offset.y + viewport.height - half).max(min_y);
-        
-        let clamped_center = Point::new(
-            center.x.clamp(min_x, max_x),
-            center.y.clamp(min_y, max_y)
-        );
-        
-        self.hover_overlay_center = Some(clamped_center);
-        self.update_preview(image_point, scale);
+        self.hover_overlay_center = Some(cursor);
+
+        self.update_preview(image_point);
     }
 
-    fn update_preview(&mut self, image_point: Point, scale: f32) {
+    fn draw_overlay(&self, frame: &mut Frame, bounds: Rectangle) {
+        let clip_region = Rectangle::new(Point::ORIGIN, bounds.size());
+        frame.with_clip(clip_region, |frame| {
+            if self.image.is_some() {
+                let corner_size = Size::new(20.0, 20.0);
+                let right = (bounds.width - corner_size.width).max(0.0);
+                let bottom = (bounds.height - corner_size.height).max(0.0);
+
+                frame.fill_rectangle(Point::ORIGIN, corner_size, Color::from_rgb(1.0, 0.0, 0.0));
+                frame.fill_rectangle(
+                    Point::new(right, 0.0),
+                    corner_size,
+                    Color::from_rgb(0.0, 1.0, 0.0),
+                );
+                frame.fill_rectangle(
+                    Point::new(0.0, bottom),
+                    corner_size,
+                    Color::from_rgb(0.0, 0.0, 1.0),
+                );
+                frame.fill_rectangle(
+                    Point::new(right, bottom),
+                    corner_size,
+                    Color::from_rgb(1.0, 1.0, 0.0),
+                );
+
+                let overlay_center = match (self.hover_overlay_center, self.hover_viewport_pos) {
+                    (Some(center), _) => Some(center),
+                    (None, other) => other,
+                };
+
+                if let Some(center) = overlay_center {
+                    // Compute scale to size the overlay box correctly
+                    let scale = self.current_scale(bounds.size());
+                    let overlay_screen_size = (self.region_size as f32) * scale;
+                    let half = overlay_screen_size / 2.0;
+                    let top_left = Point::new(center.x - half, center.y - half);
+                    let overlay_size =
+                        Size::new(overlay_screen_size, overlay_screen_size);
+
+                    // Only stroke, no fill
+                    frame.stroke_rectangle(
+                        top_left,
+                        overlay_size,
+                        Stroke::default()
+                            .with_width(2.67)
+                            .with_color(Color::from_rgb(1.0, 0.0, 1.0)),
+                    );
+                    frame.fill_rectangle(
+                        Point::new(center.x - 2.0, center.y - 2.0),
+                        Size::new(4.0, 4.0),
+                        Color::WHITE,
+                    );
+                }
+            }
+        });
+
+        let border = Stroke::default()
+            .with_width(1.0)
+            .with_color(Color::from_rgb8(70, 70, 70));
+        frame.stroke_rectangle(Point::ORIGIN, bounds.size(), border);
+    }
+
+    fn build_overlay_layer(&self, renderer: &iced::Renderer, bounds: Rectangle) -> Geometry {
+        let mut frame = Frame::new(renderer, bounds.size());
+        self.draw_overlay(&mut frame, bounds);
+        frame.into_geometry()
+    }
+
+    fn update_preview(&mut self, image_point: Point) {
         let Some(pixels) = self.pixels.as_ref() else {
             self.preview_handle = None;
             return;
@@ -806,11 +852,9 @@ impl ImageViewer {
             return;
         }
 
-        let mut region_size = (Self::OVERLAY_SCREEN_SIZE / scale).round().max(1.0) as u32;
-        let max_region = width_px.min(height_px).max(1);
-        if region_size > max_region {
-            region_size = max_region;
-        }
+        // Extract a fixed-size region from the source image
+        // This will be scaled UP to the preview display size for pixel-perfect viewing
+        let region_size = self.region_size.min(width_px).min(height_px);
 
         if region_size == 0 {
             self.preview_handle = None;
@@ -822,18 +866,6 @@ impl ImageViewer {
 
         center_x = center_x.clamp(0, width_px.saturating_sub(1) as i32);
         center_y = center_y.clamp(0, height_px.saturating_sub(1) as i32);
-
-        if width_px < region_size {
-            region_size = width_px;
-        }
-        if height_px < region_size {
-            region_size = height_px;
-        }
-
-        if region_size == 0 {
-            self.preview_handle = None;
-            return;
-        }
 
         let half = (region_size as i32) / 2;
 
@@ -878,17 +910,11 @@ impl ImageViewer {
             region_size,
             region,
         ) {
-            let resized = image::imageops::resize(
-                &buffer,
-                Self::PREVIEW_DIMENSION,
-                Self::PREVIEW_DIMENSION,
-                image::imageops::FilterType::Nearest,
-            );
-
+            // Use raw pixels at 1:1 for pixel-perfect display
             self.preview_handle = Some(iced::widget::image::Handle::from_rgba(
-                resized.width(),
-                resized.height(),
-                resized.into_raw(),
+                buffer.width(),
+                buffer.height(),
+                buffer.into_raw(),
             ));
         } else {
             self.preview_handle = None;
@@ -899,7 +925,7 @@ impl ImageViewer {
 struct InteractionState {
     dragging: bool,
     drag_origin: Option<Point>,
-    drag_start_offset: AbsoluteOffset,
+    drag_start_offset: Vector,
 }
 
 impl Default for InteractionState {
@@ -907,12 +933,72 @@ impl Default for InteractionState {
         Self {
             dragging: false,
             drag_origin: None,
-            drag_start_offset: AbsoluteOffset { x: 0.0, y: 0.0 },
+            drag_start_offset: Vector::new(0.0, 0.0),
         }
     }
 }
 
-impl Program<Message> for ImageViewer {
+// Wrapper for the image layer - draws the image with pan/zoom, no event handling
+struct ImageLayer<'a>(&'a ImageViewer);
+
+impl<'a> Program<Message> for ImageLayer<'a> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> Vec<Geometry> {
+        let viewer = self.0;
+        let image_layer = viewer.image_cache.draw(renderer, bounds.size(), |frame| {
+            frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::from_rgb8(18, 18, 18));
+
+            if let Some(handle) = &viewer.image {
+                // Check if we have a pre-computed cropped handle
+                if let Some(cropped) = &viewer.cropped_handle {
+                    // Use cached cropped image
+                    frame.draw_image(
+                        viewer.cropped_dest,
+                        canvas::Image::new(cropped.clone())
+                            .filter_method(iced::widget::image::FilterMethod::Nearest),
+                    );
+                } else {
+                    // No clipping needed - draw full image
+                    let scale = viewer.current_scale(bounds.size());
+                    let dest_rect = Rectangle::new(
+                        Point::new(viewer.offset.x, viewer.offset.y),
+                        Size::new(
+                            viewer.image_size.width * scale,
+                            viewer.image_size.height * scale,
+                        ),
+                    );
+                    frame.draw_image(
+                        dest_rect,
+                        canvas::Image::new(handle.clone())
+                            .filter_method(iced::widget::image::FilterMethod::Nearest),
+                    );
+                }
+            } else {
+                frame.fill_text(canvas::Text {
+                    content: "No image loaded".to_string(),
+                    position: Point::new(bounds.width / 2.0 - 70.0, bounds.height / 2.0),
+                    color: Color::from_rgb8(200, 200, 200),
+                    ..Default::default()
+                });
+            }
+        });
+
+        vec![image_layer]
+    }
+}
+
+// Wrapper for the overlay layer - draws overlays and handles all events
+struct OverlayLayer<'a>(&'a ImageViewer);
+
+impl<'a> Program<Message> for OverlayLayer<'a> {
     type State = InteractionState;
 
     fn draw(
@@ -923,59 +1009,9 @@ impl Program<Message> for ImageViewer {
         bounds: Rectangle,
         _cursor: Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let clip_region = Rectangle::new(Point::ORIGIN, frame.size());
-
-        frame.with_clip(clip_region, |frame| {
-            frame.fill_rectangle(Point::ORIGIN, frame.size(), Color::from_rgb8(18, 18, 18));
-
-            if let Some(handle) = &self.image {
-                let scale = self.current_scale(bounds.size());
-                let translation = self.compute_translation(bounds.size(), scale);
-
-                frame.with_save(|frame| {
-                    frame.translate(translation);
-                    frame.scale(scale);
-                    frame.draw_image(
-                        Rectangle::new(Point::ORIGIN, self.image_size),
-                        canvas::Image::new(handle.clone()),
-                    );
-                });
-            } else {
-                frame.fill_text(canvas::Text {
-                    content: "No image loaded".to_string(),
-                    position: Point::new(bounds.width / 2.0 - 70.0, bounds.height / 2.0),
-                    color: Color::from_rgb8(200, 200, 200),
-                    ..Default::default()
-                });
-            }
-
-            let overlay_center = match (self.hover_overlay_center, self.hover_viewport_pos) {
-                (Some(center), _) => Some(center),
-                (None, other) => other,
-            };
-
-            if let Some(center) = overlay_center {
-                let half = Self::OVERLAY_SCREEN_SIZE / 2.0;
-                let top_left = Point::new(center.x - half, center.y - half);
-                let overlay_size = Size::new(Self::OVERLAY_SCREEN_SIZE, Self::OVERLAY_SCREEN_SIZE);
-
-                let overlay_fill = Color::from_rgba(0.2, 0.6, 0.9, 0.15);
-                let overlay_border = Stroke::default()
-                    .with_width(2.0)
-                    .with_color(Color::from_rgba(0.2, 0.6, 0.9, 0.7));
-
-                frame.fill_rectangle(top_left, overlay_size, overlay_fill);
-                frame.stroke_rectangle(top_left, overlay_size, overlay_border);
-            }
-
-            let border = Stroke::default()
-                .with_width(1.0)
-                .with_color(Color::from_rgb8(70, 70, 70));
-            frame.stroke_rectangle(Point::ORIGIN, frame.size(), border);
-        });
-
-        vec![frame.into_geometry()]
+        let viewer = self.0;
+        let overlay = viewer.build_overlay_layer(renderer, bounds);
+        vec![overlay]
     }
 
     fn update(
@@ -985,6 +1021,7 @@ impl Program<Message> for ImageViewer {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> (event::Status, Option<Message>) {
+        let viewer = self.0;
         match event {
             canvas::Event::Mouse(mouse_event) => match mouse_event {
                 mouse::Event::ButtonPressed(mouse::Button::Left) => {
@@ -992,7 +1029,7 @@ impl Program<Message> for ImageViewer {
                         if let Some(global) = cursor.position() {
                             state.dragging = true;
                             state.drag_origin = Some(global);
-                            state.drag_start_offset = self.scroll_offset;
+                            state.drag_start_offset = viewer.offset;
                         } else {
                             state.dragging = false;
                             state.drag_origin = None;
@@ -1011,6 +1048,10 @@ impl Program<Message> for ImageViewer {
                     event::Status::Captured,
                     Some(Message::Viewer(ViewerEvent::Reset)),
                 ),
+                mouse::Event::ButtonPressed(mouse::Button::Middle) => (
+                    event::Status::Captured,
+                    Some(Message::Viewer(ViewerEvent::ToggleDebug)),
+                ),
                 mouse::Event::CursorMoved { .. } => {
                     let viewport_cursor = cursor.position_in(bounds);
 
@@ -1019,39 +1060,32 @@ impl Program<Message> for ImageViewer {
                             if let Some(current) = cursor.position() {
                                 let displacement =
                                     Vector::new(current.x - origin.x, current.y - origin.y);
-                                if displacement.x.abs() > f32::EPSILON
-                                    || displacement.y.abs() > f32::EPSILON
-                                {
-                                    return (
-                                        event::Status::Captured,
-                                        Some(Message::Viewer(ViewerEvent::Dragged {
-                                            displacement,
-                                            bounds: bounds.size(),
-                                            start_offset: state.drag_start_offset,
-                                            cursor: viewport_cursor,
-                                            offset: self.scroll_offset,
-                                        })),
-                                    );
-                                }
+
+                                let new_offset = state.drag_start_offset + displacement;
+
+                                return (
+                                    event::Status::Captured,
+                                    Some(Message::Viewer(ViewerEvent::Pan {
+                                        offset: new_offset,
+                                        bounds: bounds.size(),
+                                    })),
+                                );
                             }
                         }
+                    }
 
+                    if let Some(cursor_pos) = viewport_cursor {
                         (
                             event::Status::Captured,
                             Some(Message::Viewer(ViewerEvent::Hover {
-                                cursor: viewport_cursor,
+                                cursor: cursor_pos,
                                 bounds: bounds.size(),
-                                offset: self.scroll_offset,
                             })),
                         )
                     } else {
                         (
                             event::Status::Captured,
-                            Some(Message::Viewer(ViewerEvent::Hover {
-                                cursor: viewport_cursor,
-                                bounds: bounds.size(),
-                                offset: self.scroll_offset,
-                            })),
+                            Some(Message::Viewer(ViewerEvent::Leave)),
                         )
                     }
                 }
@@ -1062,8 +1096,8 @@ impl Program<Message> for ImageViewer {
                     };
 
                     if steps.abs() > f32::EPSILON {
-                        let factor = 1.1_f32.powf(steps);
-                        let cursor_position = cursor.position_in(bounds);
+                        let factor = if steps > 0.0 { 1.1 } else { 0.9 };
+                        let cursor_position = cursor.position_in(bounds).unwrap_or(Point::ORIGIN);
                         (
                             event::Status::Captured,
                             Some(Message::Viewer(ViewerEvent::Zoom {
@@ -1078,11 +1112,7 @@ impl Program<Message> for ImageViewer {
                 }
                 mouse::Event::CursorLeft => (
                     event::Status::Captured,
-                    Some(Message::Viewer(ViewerEvent::Hover {
-                        cursor: None,
-                        bounds: bounds.size(),
-                        offset: self.scroll_offset,
-                    })),
+                    Some(Message::Viewer(ViewerEvent::Leave)),
                 ),
                 _ => (event::Status::Ignored, None),
             },

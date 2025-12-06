@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "anoto_dot_reader"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "argh",
  "bytesize",
