@@ -592,8 +592,8 @@ fn otsu_threshold(pixels: &[u8]) -> u8 {
 
 fn split_large_component(
     pixels: &[usize],
-    mask: &[u8],
-    grayscale: &[u8],
+    _mask: &[u8],
+    _grayscale: &[u8],
     rgb: &[u8],
     width: usize,
     height: usize,
@@ -689,4 +689,102 @@ fn split_large_component(
     }
 
     detections
+}
+
+/// Attempt to infer grid rows/columns and produce a simple textual representation.
+pub fn detect_grid(dots: &[DotDetection], config: &AnotoConfig) -> Option<(usize, usize, String, Option<(f32, f32)>)> {
+    if dots.is_empty() { return None; }
+    // extract centers
+    let centers: Vec<(f32,f32)> = dots.iter().map(|d| d.center).collect();
+
+    // compute centroid
+    let mean_x = centers.iter().map(|c| c.0).sum::<f32>() / centers.len() as f32;
+    let mean_y = centers.iter().map(|c| c.1).sum::<f32>() / centers.len() as f32;
+
+    // compute covariance matrix
+    let mut sxx = 0f32; let mut sxy = 0f32; let mut syy = 0f32;
+    for &(x,y) in &centers {
+        let dx = x - mean_x; let dy = y - mean_y;
+        sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+    }
+    let n = centers.len() as f32;
+    sxx /= n; sxy /= n; syy /= n;
+    // principal eigenvector of 2x2 [[sxx,sxy],[sxy,syy]]
+    let trace = sxx + syy;
+    let det = sxx*syy - sxy*sxy;
+    let temp = ((trace*trace)/4.0 - det).max(0.0);
+    let lambda = trace/2.0 + temp.sqrt();
+    // eigenvector (a - c, b)
+    let vx = lambda - syy; let vy = sxy;
+    let angle = vy.atan2(vx); // direction of principal axis
+
+    // rotate points by -angle to align grid axes
+    let cos_a = angle.cos(); let sin_a = angle.sin();
+    let mut rotated: Vec<(f32,f32)> = Vec::new();
+    for &(x,y) in &centers {
+        let dx = x - mean_x; let dy = y - mean_y;
+        let rx = dx * cos_a + dy * sin_a;
+        let ry = -dx * sin_a + dy * cos_a;
+        rotated.push((rx, ry));
+    }
+
+    // cluster x and y into unique columns/rows
+    fn cluster_positions(vals: &mut Vec<f32>) -> Vec<f32> {
+        vals.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        // find median spacing
+        let mut diffs = Vec::new();
+        for i in 1..vals.len() { diffs.push(vals[i] - vals[i-1]); }
+        let spacing = if diffs.is_empty() { 1.0 } else {
+            let mut ds = diffs.clone(); ds.sort_by(|a,b| a.partial_cmp(b).unwrap()); ds[ds.len()/2]
+        };
+        let mut clusters: Vec<f32> = Vec::new();
+        if vals.is_empty() { return clusters; }
+        let mut cur = vals[0];
+        for v in vals.iter().skip(1) {
+            if (v - cur).abs() > spacing * 0.6 {
+                clusters.push(cur);
+                cur = *v;
+            } else {
+                // average into cluster center
+                cur = (cur + *v) / 2.0;
+            }
+        }
+        clusters.push(cur);
+        clusters
+    }
+
+    let mut xs: Vec<f32> = rotated.iter().map(|c| c.0).collect();
+    let mut ys: Vec<f32> = rotated.iter().map(|c| c.1).collect();
+    let cols = cluster_positions(&mut xs);
+    let rows = cluster_positions(&mut ys);
+    if cols.is_empty() || rows.is_empty() { return None; }
+
+    // build grid
+    let mut grid = vec![vec!['.'; cols.len()]; rows.len()];
+    for (i, &(rx, ry)) in rotated.iter().enumerate() {
+        // find nearest col and row
+        let mut best_c = 0usize; let mut best_cd = f32::MAX;
+        for (ci, &cx) in cols.iter().enumerate() { let d = (rx - cx).abs(); if d < best_cd { best_cd = d; best_c = ci; } }
+        let mut best_r = 0usize; let mut best_rd = f32::MAX;
+        for (ri, &ryv) in rows.iter().enumerate() { let d = (ry - ryv).abs(); if d < best_rd { best_rd = d; best_r = ri; } }
+        // get color char
+        let color_ch = color_char_from_type(dots[i].type_color, config);
+        grid[best_r][best_c] = color_ch;
+    }
+
+    // build ASCII grid string
+    let mut lines = Vec::new();
+    for r in 0..rows.len() { let line: String = grid[r].iter().collect(); lines.push(line); }
+    let arrow_grid = lines.join("\n");
+    // approximate origin: top-left grid center -> convert to original coordinates
+    let origin = Some((mean_x + cols[0] * cos_a - rows[0] * sin_a, mean_y + cols[0] * sin_a + rows[0] * cos_a));
+    Some((rows.len(), cols.len(), arrow_grid, origin))
+}
+
+fn color_char_from_type(c: Rgba<u8>, config: &AnotoConfig) -> char {
+    let palette = [config.color_green, config.color_orange, config.color_blue, config.color_magenta];
+    let chars = ['G','O','B','M'];
+    let mut best = 0usize; let mut best_d = color_distance(c, palette[0]);
+    for i in 1..palette.len() { let d = color_distance(c, palette[i]); if d < best_d { best_d = d; best = i; } }
+    chars[best]
 }
