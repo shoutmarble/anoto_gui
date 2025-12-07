@@ -1,6 +1,6 @@
 use argh::FromArgs;
 use std::{fs, path::PathBuf};
-
+// ...existing code removed for fresh implementation...
 use kornia::io::functional as F;
 use kornia::{
     image::{Image, allocator::CpuAllocator},
@@ -21,7 +21,7 @@ struct Args {
 #[allow(dead_code)]
 pub fn image_proc() -> Result<(), Box<dyn std::error::Error>> {
     // read the image from the assets (hard-coded path)
-    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/anoto_dots.png")?;
+    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/anoto_dots2.png")?;
 
     // ensure output directory exists
     let out_dir = PathBuf::from("output");

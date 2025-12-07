@@ -1,8 +1,10 @@
 #![allow(dead_code)]
-
-use std::{collections::VecDeque, f32::consts::PI};
+//! Detects anoto dots in a preview image, draws circles around them, and provides grid line drawing functions.
 
 use image::{DynamicImage, Rgba, RgbaImage};
+use std::collections::{HashSet, VecDeque};
+use std::f32::consts::PI;
+// Note: thiserror is used via derive attribute `thiserror::Error` on DetectionError
 use kornia::{
     image::{Image, ImageError, ImageSize, allocator::CpuAllocator},
     imgproc,
@@ -13,8 +15,8 @@ type CpuImage<T, const C: usize> = Image<T, C, CpuAllocator>;
 const MIN_COMPONENT_PIXELS: usize = 3;
 const MAX_COMPONENT_PIXELS: usize = 250;
 const CENTRALITY_THRESHOLD: f32 = 0.55;
-const COLOR_BLACK: Rgba<u8> = Rgba([25, 25, 25, 255]);
-const COLOR_RED: Rgba<u8> = Rgba([220, 60, 60, 255]);
+const COLOR_GREEN: Rgba<u8> = Rgba([110, 170, 90, 255]);
+const COLOR_ORANGE: Rgba<u8> = Rgba([230, 130, 30, 255]);
 const COLOR_BLUE: Rgba<u8> = Rgba([60, 110, 220, 255]);
 const COLOR_MAGENTA: Rgba<u8> = Rgba([210, 70, 210, 255]);
 
@@ -27,8 +29,8 @@ pub struct AnotoConfig {
     pub min_component_pixels: usize,
     pub max_component_pixels: usize,
     pub centrality_threshold: f32,
-    pub color_black: Rgba<u8>,
-    pub color_red: Rgba<u8>,
+    pub color_green: Rgba<u8>,
+    pub color_orange: Rgba<u8>,
     pub color_blue: Rgba<u8>,
     pub color_magenta: Rgba<u8>,
 }
@@ -39,8 +41,8 @@ impl Default for AnotoConfig {
             min_component_pixels: MIN_COMPONENT_PIXELS,
             max_component_pixels: MAX_COMPONENT_PIXELS,
             centrality_threshold: CENTRALITY_THRESHOLD,
-            color_black: COLOR_BLACK,
-            color_red: COLOR_RED,
+            color_green: COLOR_GREEN,
+            color_orange: COLOR_ORANGE,
             color_blue: COLOR_BLUE,
             color_magenta: COLOR_MAGENTA,
         }
@@ -49,12 +51,13 @@ impl Default for AnotoConfig {
 
 /// Represents a detected dot in an Anoto pattern.
 ///
-/// Contains the dot's center coordinates, radius, and classified color.
-#[derive(Debug)]
+/// Contains the dot's center coordinates, radius, actual dot color, and classified type color.
+#[derive(Debug, Clone)]
 pub struct DotDetection {
     pub center: (f32, f32),
     pub radius: f32,
-    pub color: Rgba<u8>,
+    pub dot_color: Rgba<u8>,
+    pub type_color: Rgba<u8>,
 }
 
 /// Errors that can occur during Anoto dot detection.
@@ -64,34 +67,32 @@ pub enum DetectionError {
     Kornia(#[from] ImageError),
 }
 
+/// Result of Anoto dot annotation.
+#[derive(Debug, Clone)]
+pub struct AnotoDetection {
+    pub annotated: DynamicImage,
+    pub arrow_grid: String,
+    pub origin: Option<(f32, f32)>,
+}
+
 /// Detects and annotates Anoto dots in an image.
 ///
 /// This function processes an image to identify Anoto dot patterns, classifies them
 /// by color, and returns an annotated version with visual overlays plus a grid
-/// representation of the detected pattern.
-///
-/// # Arguments
-///
-/// * `source` - The input image to process
-/// * `config` - Detection configuration parameters
-///
-/// # Returns
-///
-/// Returns a tuple containing:
-/// * The annotated image with detected dots highlighted
-/// * A string representation of the arrow grid pattern
-///
-/// # Errors
-///
-/// Returns `DetectionError` if image processing fails.
+/// representation of the detected pattern, along with the inferred origin between
+/// the detected dot rows/columns.
 pub fn annotate_anoto_dots(
     source: &DynamicImage,
     config: &AnotoConfig,
-) -> Result<(DynamicImage, String), DetectionError> {
+) -> Result<AnotoDetection, DetectionError> {
     let rgb = source.to_rgb8();
     let (width, height) = rgb.dimensions();
     if width == 0 || height == 0 {
-        return Ok((source.clone(), String::new()));
+        return Ok(AnotoDetection {
+            annotated: source.clone(),
+            arrow_grid: String::new(),
+            origin: None,
+        });
     }
 
     let raw_pixels = rgb.into_raw();
@@ -122,142 +123,82 @@ pub fn annotate_anoto_dots(
         height as usize,
         config,
     );
+
+    // Detect rotation: if more unique x positions than y, assume 90 degree rotation
+    let xs: Vec<f32> = components.iter().map(|d| d.center.0).collect();
+    let ys: Vec<f32> = components.iter().map(|d| d.center.1).collect();
+    let unique_x: HashSet<i32> = xs.iter().map(|&x| x.round() as i32).collect();
+    let unique_y: HashSet<i32> = ys.iter().map(|&y| y.round() as i32).collect();
+    let _rotated = unique_x.len() > unique_y.len();
+
+    // Adjust components for rotation - removed to avoid coordinate mismatch in drawing
+    // Use original components for drawing on original canvas
+
+    // Check for exactly 4 unique colors
+    let unique_colors: std::collections::HashSet<Rgba<u8>> = components.iter().map(|d| d.type_color).collect();
+    if unique_colors.len() != 4 {
+        eprintln!("Warning: Detected {} unique colors, expected 4.", unique_colors.len());
+    }
+
     let mut canvas: RgbaImage = source.to_rgba8();
     for dot in components.iter() {
-        draw_ring(&mut canvas, dot.center, dot.radius, dot.color);
+        draw_ring(&mut canvas, dot.center, dot.radius, dot.dot_color);
     }
 
-    let mut row_ys = Vec::new();
-    let mut target_dots: Vec<&DotDetection> = components
-        .iter()
-        .filter(|d| d.color == config.color_red || d.color == config.color_magenta)
-        .collect();
+    draw_grid_lines(&mut canvas, &components);
 
-    target_dots.sort_by(|a, b| {
-        a.center
-            .1
-            .partial_cmp(&b.center.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // No row/col/arrow logic; only per-dot overlays
+    let col_xs: Vec<f32> = Vec::new();
+    let row_ys: Vec<f32> = Vec::new();
+    let arrow_grid = String::new();
 
-    if !target_dots.is_empty() {
-        let avg_radius =
-            target_dots.iter().map(|d| d.radius).sum::<f32>() / target_dots.len() as f32;
-        let row_threshold = avg_radius * 3.0;
+    let origin = if let (Some(&x0), Some(&y0)) = (col_xs.first(), row_ys.first()) {
+        Some((x0, y0))
+    } else {
+        None
+    };
 
-        let mut rows = Vec::new();
-        let mut current_row: Vec<&DotDetection> = Vec::new();
+    Ok(AnotoDetection {
+        annotated: DynamicImage::ImageRgba8(canvas),
+        arrow_grid,
+        origin,
+    })
+}
 
-        for dot in target_dots {
-            if let Some(last) = current_row.last()
-                && (dot.center.1 - last.center.1) > row_threshold
-            {
-                rows.push(current_row);
-                current_row = Vec::new();
-            }
-            current_row.push(dot);
-        }
-        if !current_row.is_empty() {
-            rows.push(current_row);
-        }
-
-        for row in rows {
-            let avg_y: f32 = row.iter().map(|d| d.center.1).sum::<f32>() / row.len() as f32;
-            row_ys.push(avg_y);
-            let y_i = avg_y.round() as i32;
-            if y_i >= 0 && y_i < height as i32 {
-                for x in 0..width {
-                    canvas.put_pixel(x, y_i as u32, config.color_magenta);
-                }
-            }
-        }
+/// Detects dots and returns the raw component detections for programmatic use.
+pub fn detect_components_from_image(
+    source: &DynamicImage,
+    config: &AnotoConfig,
+) -> Result<Vec<DotDetection>, DetectionError> {
+    let rgb = source.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    if width == 0 || height == 0 {
+        return Ok(Vec::new());
     }
-
-    let mut col_xs = Vec::new();
-    let mut col_dots: Vec<&DotDetection> = components
-        .iter()
-        .filter(|d| d.color == config.color_black || d.color == config.color_blue)
-        .collect();
-
-    col_dots.sort_by(|a, b| {
-        a.center
-            .0
-            .partial_cmp(&b.center.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    if !col_dots.is_empty() {
-        let avg_radius = col_dots.iter().map(|d| d.radius).sum::<f32>() / col_dots.len() as f32;
-        let col_threshold = avg_radius * 3.0;
-
-        let mut cols = Vec::new();
-        let mut current_col: Vec<&DotDetection> = Vec::new();
-
-        for dot in col_dots {
-            if let Some(last) = current_col.last()
-                && (dot.center.0 - last.center.0) > col_threshold
-            {
-                cols.push(current_col);
-                current_col = Vec::new();
-            }
-            current_col.push(dot);
-        }
-        if !current_col.is_empty() {
-            cols.push(current_col);
-        }
-
-        for col in cols {
-            let avg_x: f32 = col.iter().map(|d| d.center.0).sum::<f32>() / col.len() as f32;
-            col_xs.push(avg_x);
-            let x_i = avg_x.round() as i32;
-            if x_i >= 0 && x_i < width as i32 {
-                for y in 0..height {
-                    canvas.put_pixel(x_i as u32, y, config.color_blue);
-                }
-            }
-        }
-    }
-
-    let mut arrow_grid = String::new();
-    row_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    col_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    for &y in &row_ys {
-        for &x in &col_xs {
-            let mut min_dist_sq = f32::MAX;
-            let mut closest_dot = None;
-
-            for dot in &components {
-                let dx = dot.center.0 - x;
-                let dy = dot.center.1 - y;
-                let dist_sq = dx * dx + dy * dy;
-                if dist_sq < min_dist_sq {
-                    min_dist_sq = dist_sq;
-                    closest_dot = Some(dot);
-                }
-            }
-
-            if let Some(dot) = closest_dot {
-                let dx = dot.center.0 - x;
-                let dy = dot.center.1 - y;
-                let arrow = if dx.abs() > dy.abs() {
-                    if dx > 0.0 { "→" } else { "←" }
-                } else if dy > 0.0 {
-                    "↓"
-                } else {
-                    "↑"
-                };
-                arrow_grid.push_str(arrow);
-                arrow_grid.push(' ');
-            } else {
-                arrow_grid.push('?');
-                arrow_grid.push(' ');
-            }
-        }
-        arrow_grid.push('\n');
-    }
-
-    Ok((DynamicImage::ImageRgba8(canvas), arrow_grid))
+    let raw_pixels = rgb.into_raw();
+    let image = CpuImage::<u8, 3>::new(
+        ImageSize {
+            width: width as usize,
+            height: height as usize,
+        },
+        raw_pixels.clone(),
+        CpuAllocator,
+    )?;
+    let mut gray = CpuImage::<u8, 1>::from_size_val(image.size(), 0u8, CpuAllocator)?;
+    imgproc::color::gray_from_rgb_u8(&image, &mut gray)?;
+    let threshold = otsu_threshold(gray.as_slice());
+    let mut binary = CpuImage::<u8, 1>::from_size_val(gray.size(), 0u8, CpuAllocator)?;
+    imgproc::threshold::threshold_binary(&gray, &mut binary, threshold, 255)?;
+    let mut mask = binary.as_slice().to_vec();
+    ensure_foreground_convention(&mut mask);
+    Ok(extract_components(
+        &mask,
+        gray.as_slice(),
+        &raw_pixels,
+        width as usize,
+        height as usize,
+        config,
+    ))
 }
 
 fn ensure_foreground_convention(mask: &mut [u8]) {
@@ -299,6 +240,7 @@ fn extract_components(
         let mut sum_r = 0u32;
         let mut sum_g = 0u32;
         let mut sum_b = 0u32;
+        let mut component_pixels: Vec<usize> = Vec::new();
 
         while let Some(idx) = queue.pop_front() {
             let y = idx / width;
@@ -306,6 +248,7 @@ fn extract_components(
             sum_x += x as f32;
             sum_y += y as f32;
             count += 1;
+            component_pixels.push(idx);
             let rgb_idx = idx * 3;
             if rgb_idx + 2 < rgb.len() {
                 sum_r += rgb[rgb_idx] as u32;
@@ -344,6 +287,11 @@ fn extract_components(
         }
 
         if !(config.min_component_pixels..=config.max_component_pixels).contains(&count) {
+            // if too large, attempt to split into smaller dots
+            if count > config.max_component_pixels {
+                let splits = split_large_component(&component_pixels, mask, grayscale, rgb, width, height, config);
+                for d in splits { out.push(d); }
+            }
             continue;
         }
 
@@ -361,26 +309,139 @@ fn extract_components(
         let mean_r = sum_r as f32 / count as f32;
         let mean_g = sum_g as f32 / count as f32;
         let mean_b = sum_b as f32 / count as f32;
-        let color = classify_color(mean_r, mean_g, mean_b, config);
+        let dot_color = Rgba([mean_r as u8, mean_g as u8, mean_b as u8, 255]);
+        let type_color = classify_color(mean_r, mean_g, mean_b, config);
         out.push(DotDetection {
             center,
             radius,
-            color,
+            dot_color,
+            type_color,
         });
     }
 
     out
 }
 
-fn classify_color(r: f32, g: f32, b: f32, config: &AnotoConfig) -> Rgba<u8> {
-    if r < 70.0 && g < 70.0 && b < 70.0 {
-        config.color_black
-    } else if r > 190.0 && b < 120.0 && r - g > 40.0 {
-        config.color_red
-    } else if b > 190.0 && r < 150.0 && b - g > 30.0 {
-        config.color_blue
+fn color_distance(a: Rgba<u8>, b: Rgba<u8>) -> f32 {
+    let dr = a.0[0] as f32 - b.0[0] as f32;
+    let dg = a.0[1] as f32 - b.0[1] as f32;
+    let db = a.0[2] as f32 - b.0[2] as f32;
+    (dr * dr + dg * dg + db * db).sqrt()
+}
+
+fn saturation(r: f32, g: f32, b: f32) -> f32 {
+    let max = r.max(g).max(b);
+    if max == 0.0 {
+        0.0
     } else {
-        config.color_magenta
+        (max - r.min(g).min(b)) / max
+    }
+}
+
+fn classify_color(r: f32, g: f32, b: f32, config: &AnotoConfig) -> Rgba<u8> {
+    let candidate = Rgba([r as u8, g as u8, b as u8, 255]);
+    let palette = [config.color_green, config.color_orange, config.color_blue, config.color_magenta];
+    let mut best = palette[0];
+    let mut best_d = color_distance(candidate, best);
+    for &c in &palette[1..] {
+        let d = color_distance(candidate, c);
+        if d < best_d {
+            best = c;
+            best_d = d;
+        }
+    }
+    best
+}
+
+fn draw_line(canvas: &mut RgbaImage, start: (f32, f32), end: (f32, f32), thickness: f32, color: Rgba<u8>, dots: &[DotDetection]) {
+    let half_thickness = thickness / 2.0;
+    if (start.0 - end.0).abs() < 1e-6 {
+        // Vertical line
+        let x = start.0.round() as i32;
+        let y_start = start.1.min(end.1).round() as i32;
+        let y_end = start.1.max(end.1).round() as i32;
+        let width = canvas.width() as i32;
+        let height = canvas.height() as i32;
+        if x < 0 || x >= width { return; }
+        for y in y_start.max(0)..=y_end.min(height - 1) {
+            for dx in (-half_thickness.round() as i32)..=(half_thickness.round() as i32) {
+                let px = x + dx;
+                if px >= 0 && px < width {
+                    let point = (px as f32, y as f32);
+                    let mut inside_other_dot = false;
+                    for dot in dots {
+                        let dist_x = point.0 - dot.center.0;
+                        let dist_y = point.1 - dot.center.1;
+                        let dist = (dist_x * dist_x + dist_y * dist_y).sqrt();
+                        if dist < dot.radius {
+                            inside_other_dot = true;
+                            break;
+                        }
+                    }
+                    if !inside_other_dot {
+                        canvas.put_pixel(px as u32, y as u32, color);
+                    }
+                }
+            }
+        }
+    } else if (start.1 - end.1).abs() < 1e-6 {
+        // Horizontal line
+        let y = start.1.round() as i32;
+        let x_start = start.0.min(end.0).round() as i32;
+        let x_end = start.0.max(end.0).round() as i32;
+        let width = canvas.width() as i32;
+        let height = canvas.height() as i32;
+        if y < 0 || y >= height { return; }
+        for x in x_start.max(0)..=x_end.min(width - 1) {
+            for dy in (-half_thickness.round() as i32)..=(half_thickness.round() as i32) {
+                let py = y + dy;
+                if py >= 0 && py < height {
+                    let point = (x as f32, py as f32);
+                    let mut inside_other_dot = false;
+                    for dot in dots {
+                        let dist_x = point.0 - dot.center.0;
+                        let dist_y = point.1 - dot.center.1;
+                        let dist = (dist_x * dist_x + dist_y * dist_y).sqrt();
+                        if dist < dot.radius {
+                            inside_other_dot = true;
+                            break;
+                        }
+                    }
+                    if !inside_other_dot {
+                        canvas.put_pixel(x as u32, py as u32, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_grid_lines(canvas: &mut RgbaImage, dots: &[DotDetection]) {
+    use std::collections::HashMap;
+    let global_avg_radius: f32 = dots.iter().map(|d| d.radius).sum::<f32>() / dots.len() as f32;
+    let thickness = (global_avg_radius / 4.0).max(1.0);
+    let mut color_groups: HashMap<Rgba<u8>, Vec<&DotDetection>> = HashMap::new();
+    for dot in dots {
+        color_groups.entry(dot.type_color).or_insert(Vec::new()).push(dot);
+    }
+    for (color, group) in color_groups {
+        if group.is_empty() { continue; }
+        let xs: HashSet<i32> = group.iter().map(|d| d.center.0.round() as i32).collect();
+        let ys: HashSet<i32> = group.iter().map(|d| d.center.1.round() as i32).collect();
+        let is_vertical = xs.len() > ys.len();
+        if is_vertical {
+            for &x in &xs {
+                let start = (x as f32, 0.0);
+                let end = (x as f32, canvas.height() as f32);
+                draw_line(canvas, start, end, thickness, color, dots);
+            }
+        } else {
+            for &y in &ys {
+                let start = (0.0, y as f32);
+                let end = (canvas.width() as f32, y as f32);
+                draw_line(canvas, start, end, thickness, color, dots);
+            }
+        }
     }
 }
 
@@ -424,25 +485,63 @@ fn draw_ring(canvas: &mut RgbaImage, center: (f32, f32), radius: f32, color: Rgb
             let half_stroke = stroke_width * 0.5;
 
             if dist_from_ring < half_stroke + 0.5 {
-                let coverage = if dist_from_ring < half_stroke - 0.5 {
-                    1.0
-                } else {
-                    1.0 - (dist_from_ring - (half_stroke - 0.5))
-                };
-
-                let pixel = canvas.get_pixel_mut(x as u32, y as u32);
-                let bg = pixel.0;
-                let fg = color.0;
-
-                let alpha = (fg[3] as f32 / 255.0) * coverage;
-                let inv_alpha = 1.0 - alpha;
-
-                let r = (fg[0] as f32 * alpha + bg[0] as f32 * inv_alpha) as u8;
-                let g = (fg[1] as f32 * alpha + bg[1] as f32 * inv_alpha) as u8;
-                let b = (fg[2] as f32 * alpha + bg[2] as f32 * inv_alpha) as u8;
-
-                *pixel = Rgba([r, g, b, 255]);
+                // Solid overwrite to keep ring color identical to dot classification
+                *canvas.get_pixel_mut(x as u32, y as u32) = color;
             }
+        }
+    }
+}
+
+fn draw_horizontal_line(canvas: &mut RgbaImage, y: f32, color: Rgba<u8>, all_dots: &[DotDetection], should_skip: impl Fn(&DotDetection) -> bool) {
+    let y_i = y.round() as i32;
+    let width = canvas.width() as i32;
+    let height = canvas.height() as i32;
+    if y_i < 0 || y_i >= height {
+        return;
+    }
+    for x in 0..width {
+        let point = (x as f32, y as f32);
+        let mut skip = false;
+        for dot in all_dots {
+            if should_skip(dot) {
+                let dx = point.0 - dot.center.0;
+                let dy = point.1 - dot.center.1;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < dot.radius {
+                    skip = true;
+                    break;
+                }
+            }
+        }
+        if !skip {
+            canvas.put_pixel(x as u32, y_i as u32, color);
+        }
+    }
+}
+
+fn draw_vertical_line(canvas: &mut RgbaImage, x: f32, color: Rgba<u8>, all_dots: &[DotDetection], should_skip: impl Fn(&DotDetection) -> bool) {
+    let x_i = x.round() as i32;
+    let width = canvas.width() as i32;
+    let height = canvas.height() as i32;
+    if x_i < 0 || x_i >= width {
+        return;
+    }
+    for y in 0..height {
+        let point = (x as f32, y as f32);
+        let mut skip = false;
+        for dot in all_dots {
+            if should_skip(dot) {
+                let dx = point.0 - dot.center.0;
+                let dy = point.1 - dot.center.1;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < dot.radius {
+                    skip = true;
+                    break;
+                }
+            }
+        }
+        if !skip {
+            canvas.put_pixel(x_i as u32, y as u32, color);
         }
     }
 }
@@ -489,4 +588,105 @@ fn otsu_threshold(pixels: &[u8]) -> u8 {
     }
 
     threshold
+}
+
+fn split_large_component(
+    pixels: &[usize],
+    mask: &[u8],
+    grayscale: &[u8],
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    config: &AnotoConfig,
+) -> Vec<DotDetection> {
+    if pixels.is_empty() { return Vec::new(); }
+    // bounding box
+    let mut min_x = width; let mut min_y = height; let mut max_x = 0usize; let mut max_y = 0usize;
+    for &idx in pixels {
+        let y = idx / width; let x = idx % width;
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+    }
+    let w2 = max_x - min_x + 1;
+    let h2 = max_y - min_y + 1;
+    // build submask
+    let mut submask = vec![0u8; w2*h2];
+    for &idx in pixels {
+        let y = idx / width; let x = idx % width;
+        let sx = x - min_x; let sy = y - min_y; submask[sy*w2 + sx] = 1u8;
+    }
+    // distance transform: initialize distances
+    let mut dist = vec![-1i32; w2*h2];
+    let mut q = VecDeque::new();
+    for sy in 0..h2 {
+        for sx in 0..w2 {
+            let idx = sy*w2 + sx;
+            if submask[idx] == 0 { dist[idx] = 0; q.push_back(idx); }
+        }
+    }
+    while let Some(i) = q.pop_front() {
+        let x = i % w2; let y = i / w2;
+        for (dx, dy) in [(-1isize,0),(1,0),(0,-1),(0,1)] {
+            let nx = x as isize + dx; let ny = y as isize + dy;
+            if nx < 0 || ny < 0 || nx >= w2 as isize || ny >= h2 as isize { continue; }
+            let ni = ny as usize * w2 + nx as usize;
+            if dist[ni] == -1 {
+                dist[ni] = dist[i] + 1;
+                q.push_back(ni);
+            }
+        }
+    }
+
+    // find local maxima in dist for foreground pixels
+    let mut peaks: Vec<(usize, usize, i32)> = Vec::new();
+    for sy in 0..h2 {
+        for sx in 0..w2 {
+            let idx = sy*w2 + sx;
+            if submask[idx] == 0 { continue; }
+            let d = dist[idx]; if d <= 0 { continue; }
+            let mut is_peak = true;
+            for (dx, dy) in [(-1isize,0),(1,0),(0,-1),(0,1)] {
+                let nx = sx as isize + dx; let ny = sy as isize + dy;
+                if nx < 0 || ny < 0 || nx >= w2 as isize || ny >= h2 as isize { continue; }
+                let ni = ny as usize * w2 + nx as usize;
+                if dist[ni] > d { is_peak = false; break; }
+            }
+            if is_peak { peaks.push((sx, sy, d)); }
+        }
+    }
+
+    // sort peaks by distance desc
+    peaks.sort_by(|a,b| b.2.cmp(&a.2));
+    let mut detections = Vec::new();
+    for (sx, sy, d) in peaks {
+        if d < 3 { continue; }
+        // global center
+        let cx = (min_x + sx) as f32;
+        let cy = (min_y + sy) as f32;
+        let radius = d as f32; // approx
+        // compute mean color in small neighborhood
+        let mut sum_r = 0u32; let mut sum_g = 0u32; let mut sum_b = 0u32; let mut cnt = 0usize;
+        let gx_min = (cx as isize - radius as isize - 1).max(0) as usize;
+        let gy_min = (cy as isize - radius as isize - 1).max(0) as usize;
+        let gx_max = (cx as usize + radius as usize + 1).min(width - 1);
+        let gy_max = (cy as usize + radius as usize + 1).min(height - 1);
+        for gy in gy_min..=gy_max {
+            for gx in gx_min..=gx_max {
+                let dx = gx as f32 - cx; let dy = gy as f32 - cy; if (dx*dx+dy*dy).sqrt() > radius+1.0 { continue; }
+                let idx = gy * width + gx; let rgb_idx = idx*3;
+                if rgb_idx + 2 < rgb.len() {
+                    sum_r += rgb[rgb_idx] as u32; sum_g += rgb[rgb_idx+1] as u32; sum_b += rgb[rgb_idx+2] as u32; cnt += 1;
+                }
+            }
+        }
+        if cnt == 0 { continue; }
+        let mean_r = sum_r as f32 / cnt as f32; let mean_g = sum_g as f32 / cnt as f32; let mean_b = sum_b as f32 / cnt as f32;
+        let dot_color = Rgba([mean_r as u8, mean_g as u8, mean_b as u8, 255]);
+        let type_color = classify_color(mean_r, mean_g, mean_b, config);
+        detections.push(DotDetection { center: (cx, cy), radius: radius, dot_color, type_color });
+    }
+
+    detections
 }

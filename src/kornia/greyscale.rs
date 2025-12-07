@@ -3,14 +3,14 @@ use kornia::{
     image::{Image, ImageSize, allocator::CpuAllocator},
     imgproc,
 };
-
+// ...existing code removed for fresh implementation...
 type CpuImage<T, const C: usize> = Image<T, C, CpuAllocator>;
 
 #[allow(dead_code)]
 pub fn show_greyscale() -> Result<(), Box<dyn std::error::Error>> {
     // read the image
     // let image: CpuImage<u8, 3> = F::read_image_any_rgb8("tests/data/dog.jpeg")?;
-    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/dots.png")?;
+    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/anoto_dots2.png")?;
 
     let image_viz = image.clone();
 

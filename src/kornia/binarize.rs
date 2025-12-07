@@ -1,6 +1,6 @@
 use argh::FromArgs;
 use std::path::PathBuf;
-
+// ...existing code removed for fresh implementation...
 use kornia::io::functional as F;
 use kornia::{
     image::{Image, allocator::CpuAllocator},
@@ -20,11 +20,10 @@ struct Args {
 
 #[allow(dead_code)]
 pub fn binarize() -> Result<(), Box<dyn std::error::Error>> {
-    // let args: Args = argh::from_env();
 
     // read the image
     // let image = F::read_image_any_rgb8(args.image_path)?;
-    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/dots.png")?;
+    let image: CpuImage<u8, 3> = F::read_image_any_rgb8("src/kornia/assets/anoto_dots2.png")?;
 
     // binarize the image as u8
     let mut bin: CpuImage<u8, 3> = Image::from_size_val(image.size(), 0, CpuAllocator)?;
