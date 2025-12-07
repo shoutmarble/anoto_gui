@@ -1,4 +1,5 @@
 use anoto_dot_reader::kornia::anoto::{detect_components_from_image, detect_grid, AnotoConfig, annotate_anoto_dots};
+use image::DynamicImage;
 use std::fs;
 
 #[test]

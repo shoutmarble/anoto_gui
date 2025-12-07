@@ -1,5 +1,5 @@
 use anoto_dot_reader::kornia::anoto::{annotate_anoto_dots, AnotoConfig};
-use image::DynamicImage;
+// image::DynamicImage is not required in this test; open returns DynamicImage.
 
 #[test]
 fn smoke_detect_assets() {
