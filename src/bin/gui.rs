@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 #[path = "../gui_app/mod.rs"]
 mod gui_app;
 

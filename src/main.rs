@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod gui_app;
 
 fn main() -> iced::Result {
