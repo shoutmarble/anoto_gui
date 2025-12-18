@@ -1,21 +1,26 @@
 use iced::mouse::Cursor;
-use iced::widget::canvas::{self, Canvas, Frame, Geometry, Program, Stroke, event};
-use iced::widget::{button, column, container, pane_grid, stack, text, scrollable};
+use iced::widget::canvas::{self, Canvas, Frame, Geometry, Program, Stroke};
+use iced::widget::{button, column, container, pane_grid, stack, text, scrollable, text_editor};
 use iced::{
-    Color, Element, Font, Length, Point, Rectangle, Size, Subscription, Task, Theme, Vector,
-    keyboard, mouse, window,
+    keyboard, mouse, window, Color, Element, Font, Length, Point, Rectangle, Size, Subscription,
+    Task, Theme, Vector,
 };
+use iced_core::Bytes;
 use image::{DynamicImage, RgbaImage};
-use crate::kornia::anoto::{annotate_anoto_dots, AnotoConfig, AnotoDetection};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anoto_dot_reader::kornia::anoto::{detect_components_from_image, detect_grid, AnotoConfig};
+use anoto_dot_reader::minify_arrow_grid::{minify_from_full_grid, write_grid_json_string};
+use anoto_dot_reader::plot_grid::{build_intersection_grid, render_plot_rgba};
 
 const JETBRAINS_FONT_BYTES: &[u8] =
     include_bytes!("../../assets/JetBrainsMono/fonts/ttf/JetBrainsMono-Medium.ttf");
-
 const JETBRAINS_FONT: Font = Font::with_name("JetBrains Mono");
 
 pub fn run_iced_app() -> iced::Result {
-    iced::application("Anoto Dot Reader", AnotoApp::update, AnotoApp::view)
+    iced::application(AnotoApp::new, AnotoApp::update, AnotoApp::view)
+        .title(AnotoApp::title)
         .subscription(AnotoApp::subscription)
         .theme(AnotoApp::theme)
         .antialiasing(false)
@@ -25,7 +30,7 @@ pub fn run_iced_app() -> iced::Result {
         })
         .font(JETBRAINS_FONT_BYTES)
         .default_font(JETBRAINS_FONT)
-        .run_with(AnotoApp::new)
+        .run()
 }
 
 struct AnotoApp {
@@ -35,6 +40,8 @@ struct AnotoApp {
     is_loading: bool,
     panes: pane_grid::State<Pane>,
     decoded_text: String,
+    preview_minified_json: String,
+    preview_minified_editor: text_editor::Content,
     shift_down: bool,
     caps_lock: bool,
 }
@@ -49,6 +56,7 @@ enum Message {
     RegionSizeChanged(u32),
     DetectionFinishedPreview(Result<DetectionPayload, String>),
     DetectionFinishedDecode(Result<DetectionPayload, String>),
+    PreviewMinifiedEditorAction(text_editor::Action),
     ShiftChanged(bool),
     CapsLockTapped,
 }
@@ -58,6 +66,7 @@ struct DetectionPayload {
     decoded_text: String,
     origin: Option<(f32, f32)>,
     annotated: Option<ImageData>,
+    minified_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -76,20 +85,14 @@ enum Pane {
 
 #[derive(Debug, Clone)]
 enum ViewerEvent {
-    Pan {
-        offset: Vector,
-        bounds: Size,
-    },
+    Pan { offset: Vector, bounds: Size },
     Zoom {
         factor: f32,
         cursor: Point,
         bounds: Size,
     },
     Reset,
-    Hover {
-        cursor: Point,
-        bounds: Size,
-    },
+    Hover { cursor: Point, bounds: Size },
     Leave,
 }
 
@@ -97,11 +100,15 @@ enum ViewerEvent {
 struct LoadedImage {
     handle: iced::widget::image::Handle,
     size: Size,
-    pixels: Vec<u8>,
+    pixels: Bytes,
     path: PathBuf,
 }
 
 impl AnotoApp {
+    fn title(&self) -> String {
+        "Anoto Dot Reader".to_string()
+    }
+
     fn new() -> (Self, Task<Message>) {
         let (mut panes, viewer_pane) = pane_grid::State::new(Pane::Viewer);
         let (controls_pane, _) = panes
@@ -118,7 +125,9 @@ impl AnotoApp {
                 last_loaded: None,
                 is_loading: false,
                 panes,
-                decoded_text: "Load an image to decode".to_string(),
+                decoded_text: "Hover to see annotated preview. Hold Shift or toggle Caps Lock to decode.".to_string(),
+                preview_minified_json: String::new(),
+                preview_minified_editor: text_editor::Content::new(),
                 shift_down: false,
                 caps_lock: false,
             },
@@ -153,11 +162,15 @@ impl AnotoApp {
                     pixels,
                     path,
                 } = image;
+
                 self.viewer.set_image(handle, size, pixels);
                 self.status_text = format!("Loaded {}", path.display());
                 self.last_loaded = Some(path);
                 self.is_loading = false;
-                self.decoded_text = "Hover to see annotated preview. Hold Shift or toggle Caps Lock to decode.".to_string();
+                self.decoded_text =
+                    "Hover to see annotated preview. Hold Shift or toggle Caps Lock to decode.".to_string();
+                self.preview_minified_json = String::new();
+                self.preview_minified_editor = text_editor::Content::new();
                 Task::none()
             }
             Message::ImageLoaded(Err(error)) => {
@@ -168,9 +181,13 @@ impl AnotoApp {
             Message::DetectionFinishedDecode(Ok(payload)) => {
                 self.viewer.set_detected_origin(payload.origin);
                 if let Some(img) = payload.annotated {
-                    self.viewer.set_preview_image(img.width, img.height, img.pixels);
+                    self.viewer
+                        .set_preview_image(img.width, img.height, img.pixels);
                 }
                 self.decoded_text = payload.decoded_text;
+                self.preview_minified_json = payload.minified_json;
+                self.preview_minified_editor =
+                    text_editor::Content::with_text(&self.preview_minified_json);
                 Task::none()
             }
             Message::DetectionFinishedDecode(Err(err)) => {
@@ -179,11 +196,31 @@ impl AnotoApp {
             }
             Message::DetectionFinishedPreview(Ok(payload)) => {
                 if let Some(img) = payload.annotated {
-                    self.viewer.set_preview_image(img.width, img.height, img.pixels);
+                    self.viewer
+                        .set_preview_image(img.width, img.height, img.pixels);
                 }
+                self.preview_minified_json = payload.minified_json;
+                self.preview_minified_editor =
+                    text_editor::Content::with_text(&self.preview_minified_json);
                 Task::none()
             }
             Message::DetectionFinishedPreview(Err(_)) => Task::none(),
+            Message::PreviewMinifiedEditorAction(action) => {
+                // Keep selection state updated, but prevent editing.
+                if !action.is_edit() {
+                    self.preview_minified_editor.perform(action.clone());
+                }
+
+                // Clicking/focusing the minified JSON should copy it to the clipboard.
+                // (Selection + Ctrl+C will also work naturally.)
+                if !self.preview_minified_json.is_empty()
+                    && let text_editor::Action::Click(_) = action
+                {
+                    return iced::clipboard::write(self.preview_minified_json.clone());
+                }
+
+                Task::none()
+            }
             Message::ShiftChanged(down) => {
                 self.shift_down = down;
                 self.apply_lock_state(down)
@@ -216,13 +253,11 @@ impl AnotoApp {
                     run_detection_task(aoi_pixels, size),
                     Message::DetectionFinishedDecode,
                 );
-            } else {
-                self.decoded_text = "Hover over the image before locking to decode.".to_string();
             }
+            self.decoded_text = "Hover over the image before locking to decode.".to_string();
         }
 
         if !should_lock && changed {
-            // Return preview to live hover once unlocked
             self.viewer.refresh_hover();
         }
 
@@ -242,8 +277,6 @@ impl AnotoApp {
     }
 
     fn viewer_section(&self) -> Element<'_, Message> {
-        // Use Stack to layer: image canvas on bottom, overlay canvas on top
-        // Both canvases share the same viewer state for coordinates
         let image_canvas = Canvas::new(ImageLayer(&self.viewer))
             .width(Length::Fill)
             .height(Length::Fill);
@@ -252,7 +285,6 @@ impl AnotoApp {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        // Stack them: image first (bottom), then overlay (top)
         let stacked = stack![
             container(image_canvas)
                 .width(Length::Fill)
@@ -295,13 +327,11 @@ impl AnotoApp {
             .font(JETBRAINS_FONT)
             .into();
 
-        let region_size_label: Element<'_, Message> = text(format!(
-            "AOI Size: {}px",
-            self.viewer.region_size()
-        ))
-        .size(14)
-        .font(JETBRAINS_FONT)
-        .into();
+        let region_size_label: Element<'_, Message> =
+            text(format!("AOI Size: {}px", self.viewer.region_size()))
+                .size(14)
+                .font(JETBRAINS_FONT)
+                .into();
 
         let region_size_slider: Element<'_, Message> = iced::widget::slider(
             ImageViewer::MIN_REGION_SIZE..=self.viewer.max_region_size().max(ImageViewer::MIN_REGION_SIZE),
@@ -311,7 +341,6 @@ impl AnotoApp {
         .width(Length::Fill)
         .into();
 
-        // Helper function to create a legend-style frame
         let legend_style = |_: &_| container::Style {
             background: None,
             border: iced::border::Border {
@@ -332,56 +361,18 @@ impl AnotoApp {
             .style(legend_style)
             .width(Length::Fill);
 
-        let controls = column![
-            open_button,
-            zoom_box,
-            loaded_box,
-        ]
-        .spacing(16)
-        .width(Length::Fill);
+        let region_box = container(column![region_size_label, region_size_slider].spacing(8))
+            .padding(8)
+            .style(legend_style)
+            .width(Length::Fill);
 
-        // Wrap controls in a "Controls" legend
-        let controls_legend: Element<'_, Message> = column![
-            container(
-                text(" Controls ").size(12).font(JETBRAINS_FONT)
-            )
-            .style(|_| container::Style {
-                background: Some(Color::from_rgb8(32, 32, 32).into()),
-                ..Default::default()
-            }),
-            container(controls)
-                .padding(10)
-                .style(legend_style)
-        ]
-        .spacing(0)
-        .into();
+        let layout = column![open_button, zoom_box, loaded_box, region_box]
+            .spacing(16)
+            .width(Length::Fill)
+            .padding(20);
 
-        // AOI slider in its own legend
-        let aoi_legend: Element<'_, Message> = column![
-            container(
-                text(" AOI Size ").size(12).font(JETBRAINS_FONT)
-            )
-            .style(|_| container::Style {
-                background: Some(Color::from_rgb8(32, 32, 32).into()),
-                ..Default::default()
-            }),
-            container(column![region_size_label, region_size_slider].spacing(8))
-                .padding(10)
-                .style(legend_style)
-        ]
-        .spacing(0)
-        .into();
-
-        let all_controls = column![
-            controls_legend,
-            aoi_legend,
-        ]
-        .spacing(16)
-        .width(Length::Fill);
-
-        container(all_controls)
-            .width(Length::Fixed(260.0))
-            .padding(20)
+        container(layout)
+            .width(Length::Fill)
             .style(|_| container::Style {
                 background: Some(Color::from_rgb8(32, 32, 32).into()),
                 ..Default::default()
@@ -400,60 +391,57 @@ impl AnotoApp {
             ..Default::default()
         };
 
-        let shift_status = if self.shift_down { "ON" } else { "off" };
-        let caps_status = if self.caps_lock { "ON" } else { "off" };
-        let lock_status = if self.viewer.preview_locked { "locked" } else { "unlocked" };
+        let lock_text = if self.viewer.preview_locked {
+            "LOCKED (Shift/Caps Lock)"
+        } else {
+            "LIVE (hover)"
+        };
 
-        let lock_indicator: Element<'_, Message> = container(
-            text(format!("Shift: {shift_status}    Caps: {caps_status}    Preview: {lock_status}"))
-                .size(12)
-                .font(JETBRAINS_FONT),
-        )
-        .padding(6)
-        .width(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(Color::from_rgb8(24, 24, 24).into()),
-            border: iced::border::Border {
-                color: Color::from_rgb8(70, 70, 70),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
-        })
-        .into();
+        let lock_indicator: Element<'_, Message> = container(text(lock_text).size(12).font(JETBRAINS_FONT))
+            .padding(8)
+            .width(Length::Fill)
+            .style(legend_style)
+            .into();
 
-        let preview_content: Element<'_, Message> = if let Some(handle) = self.viewer.preview_handle() {
-            container(
-                iced::widget::image(handle.clone())
-                    .content_fit(iced::ContentFit::Contain),
-            )
-            .width(Length::Shrink)
-            .center_x(Length::Fill)
-            .style(|_| container::Style {
-                background: None,
-                border: iced::border::Border {
-                    color: Color::from_rgb(1.0, 0.0, 1.0), // Magenta to match AOI
-                    width: ImageViewer::PREVIEW_BORDER_WIDTH,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
+        let preview_image: Element<'_, Message> = if let Some(handle) = self.viewer.preview_handle() {
+            container(iced::widget::image(handle.clone()))
+                .width(Length::Fill)
+                .padding(8)
+                .style(legend_style)
+                .into()
         } else {
             container(text("Hover over the image to see a preview").size(12).font(JETBRAINS_FONT))
                 .width(Length::Fill)
                 .padding(8)
-                .style(|_| container::Style {
-                    background: Some(Color::from_rgb8(20, 20, 20).into()),
-                    border: iced::border::Border {
-                        color: Color::from_rgb8(70, 70, 70),
-                        width: 1.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
+                .style(legend_style)
                 .into()
         };
+
+        let minified_view: Element<'_, Message> = if self.preview_minified_json.is_empty() {
+            scrollable(
+                container(text("No minified grid available").size(12).font(JETBRAINS_FONT))
+                    .padding(8)
+                    .width(Length::Fill),
+            )
+            .height(Length::Fixed(180.0))
+            .into()
+        } else {
+            // Use a text editor so the JSON can be selected and copied.
+            // Clicking/focusing copies all text to the clipboard.
+            let editor = text_editor(&self.preview_minified_editor)
+                .on_action(Message::PreviewMinifiedEditorAction)
+                .height(Length::Fixed(180.0));
+
+            container(editor)
+                .padding(8)
+                .width(Length::Fill)
+                .into()
+        };
+
+        let preview_content: Element<'_, Message> = column![preview_image, minified_view]
+            .spacing(10)
+            .width(Length::Fill)
+            .into();
 
         let preview_legend: Element<'_, Message> = column![
             container(text(" Preview ").size(12).font(JETBRAINS_FONT)).style(|_| container::Style {
@@ -531,15 +519,14 @@ struct ImageViewer {
     // Caches
     image_cache: canvas::Cache,
 
-    // Cropped image cache for clipping
-    cropped_handle: Option<iced::widget::image::Handle>,
-    cropped_dest: Rectangle,
-
-    pixels: Option<Vec<u8>>,
+    pixels: Option<Bytes>,
     hover_viewport_pos: Option<Point>,
     hover_image_pos: Option<Point>,
     hover_overlay_center: Option<Point>,
     preview_handle: Option<iced::widget::image::Handle>,
+    last_preview_region: Option<(u32, u32, u32)>,
+    last_preview_detection_region: Option<(u32, u32, u32)>,
+    last_preview_detection_at: Option<Instant>,
     // AOI size in source pixels (drives both the overlay box and preview extraction)
     region_size: u32,
     detected_origin: Option<Point>,
@@ -564,13 +551,14 @@ impl Default for ImageViewer {
             offset: Vector::new(0.0, 0.0),
             viewport_size: Size::new(0.0, 0.0),
             image_cache: canvas::Cache::default(),
-            cropped_handle: None,
-            cropped_dest: Rectangle::new(Point::ORIGIN, Size::ZERO),
             pixels: None,
             hover_viewport_pos: None,
             hover_image_pos: None,
             hover_overlay_center: None,
             preview_handle: None,
+            last_preview_region: None,
+            last_preview_detection_region: None,
+            last_preview_detection_at: None,
             region_size: 40,
             detected_origin: None,
             preview_locked: false,
@@ -581,9 +569,9 @@ impl Default for ImageViewer {
 impl ImageViewer {
     const MIN_REGION_SIZE: u32 = 10;
     const AOI_STROKE_WIDTH: f32 = 2.67;
-    const PREVIEW_BORDER_WIDTH: f32 = 3.0;
+    const PREVIEW_DETECTION_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
-    fn set_image(&mut self, handle: iced::widget::image::Handle, size: Size, pixels: Vec<u8>) {
+    fn set_image(&mut self, handle: iced::widget::image::Handle, size: Size, pixels: Bytes) {
         self.image = Some(handle);
         self.image_size = size;
         self.image_dimensions = (size.width.round() as u32, size.height.round() as u32);
@@ -598,119 +586,16 @@ impl ImageViewer {
         self.hover_image_pos = None;
         self.hover_overlay_center = None;
         self.preview_handle = None;
+        self.last_preview_region = None;
+        self.last_preview_detection_region = None;
+        self.last_preview_detection_at = None;
         self.detected_origin = None;
         self.preview_locked = false;
-        self.cropped_handle = None;
-        self.cropped_dest = Rectangle::new(Point::ORIGIN, Size::ZERO);
         self.invalidate_image_layer();
     }
 
     fn invalidate_image_layer(&mut self) {
         self.image_cache.clear();
-        self.update_cropped_cache();
-    }
-
-    fn update_cropped_cache(&mut self) {
-        // Clear existing cache
-        self.cropped_handle = None;
-        self.cropped_dest = Rectangle::new(Point::ORIGIN, Size::ZERO);
-
-        let Some(params) = self.clip_params() else { return };
-        let Some(cropped) = self.extract_rect_pixels(params.src_left, params.src_top, params.crop_w, params.crop_h) else {
-            return;
-        };
-
-        self.cropped_handle = Some(iced::widget::image::Handle::from_rgba(
-            params.crop_w,
-            params.crop_h,
-            cropped,
-        ));
-
-        self.cropped_dest = params.dest;
-    }
-
-    fn clip_params(&self) -> Option<ClipParams> {
-        let bounds = self.viewport_size;
-        if self.image.is_none() || bounds.width <= 0.0 {
-            return None;
-        }
-
-        let scale = self.current_scale(bounds);
-        let img_left = self.offset.x;
-        let img_top = self.offset.y;
-        let img_width = self.image_size.width * scale;
-        let img_height = self.image_size.height * scale;
-
-        let needs_clip = img_left < 0.0
-            || img_top < 0.0
-            || img_left + img_width > bounds.width
-            || img_top + img_height > bounds.height;
-
-        if !needs_clip {
-            return None;
-        }
-
-        let (img_w, img_h) = self.image_dimensions;
-
-        let vis_left = img_left.max(0.0);
-        let vis_top = img_top.max(0.0);
-        let vis_right = (img_left + img_width).min(bounds.width);
-        let vis_bottom = (img_top + img_height).min(bounds.height);
-
-        if vis_right <= vis_left || vis_bottom <= vis_top {
-            return None;
-        }
-
-        let src_left = ((vis_left - img_left) / scale).floor() as u32;
-        let src_top = ((vis_top - img_top) / scale).floor() as u32;
-        let src_right = (((vis_right - img_left) / scale).ceil() as u32).min(img_w);
-        let src_bottom = (((vis_bottom - img_top) / scale).ceil() as u32).min(img_h);
-
-        let crop_w = src_right.saturating_sub(src_left);
-        let crop_h = src_bottom.saturating_sub(src_top);
-
-        if crop_w == 0 || crop_h == 0 {
-            return None;
-        }
-
-        let dest_x = img_left + (src_left as f32 * scale);
-        let dest_y = img_top + (src_top as f32 * scale);
-        let dest = Rectangle::new(
-            Point::new(dest_x, dest_y),
-            Size::new(crop_w as f32 * scale, crop_h as f32 * scale),
-        );
-
-        Some(ClipParams {
-            src_left,
-            src_top,
-            crop_w,
-            crop_h,
-            dest,
-        })
-    }
-
-    fn extract_rect_pixels(&self, start_x: u32, start_y: u32, width: u32, height: u32) -> Option<Vec<u8>> {
-        let pixels = self.pixels.as_ref()?;
-        let (img_w, img_h) = self.image_dimensions;
-        if width == 0 || height == 0 || img_w == 0 || img_h == 0 {
-            return None;
-        }
-
-        let bytes_per_pixel = 4usize;
-        let row_len = (width as usize) * bytes_per_pixel;
-        let mut out = vec![0u8; (width as usize) * (height as usize) * bytes_per_pixel];
-
-        for row in 0..height {
-            let src_y = start_y + row;
-            let src_index = ((src_y * img_w) + start_x) as usize * bytes_per_pixel;
-            let dst_index = (row as usize) * row_len;
-            if src_index + row_len <= pixels.len() {
-                out[dst_index..dst_index + row_len]
-                    .copy_from_slice(&pixels[src_index..src_index + row_len]);
-            }
-        }
-
-        Some(out)
     }
 
     fn clamp_offset(&self, offset: Vector, viewport: Size, scale: f32) -> Vector {
@@ -811,12 +696,29 @@ impl ImageViewer {
                 if !self.preview_locked {
                     self.hover_viewport_pos = Some(cursor);
                     self.refresh_hover();
-                    if let Some((aoi_pixels, region_size)) = self.current_aoi() {
-                        let size = Size::new(region_size as f32, region_size as f32);
-                        return Task::perform(
-                            run_detection_task(aoi_pixels, size),
-                            Message::DetectionFinishedPreview,
-                        );
+
+                    // Only kick off preview detection when the AOI region actually changes.
+                    if let Some(key) = self.current_aoi_region_key() {
+                        if self.last_preview_detection_region != Some(key) {
+                            if let Some(last) = self.last_preview_detection_at
+                                && Instant::now().duration_since(last)
+                                    < Self::PREVIEW_DETECTION_MIN_INTERVAL
+                            {
+                                return Task::none();
+                            }
+
+                            self.last_preview_detection_region = Some(key);
+                            self.last_preview_detection_at = Some(Instant::now());
+                            if let Some((aoi_pixels, region_size)) = self.current_aoi() {
+                                let size = Size::new(region_size as f32, region_size as f32);
+                                return Task::perform(
+                                    run_detection_task(aoi_pixels, size),
+                                    Message::DetectionFinishedPreview,
+                                );
+                            }
+                        }
+                    } else {
+                        self.last_preview_detection_region = None;
                     }
                 }
                 Task::none()
@@ -827,6 +729,9 @@ impl ImageViewer {
                     self.hover_image_pos = None;
                     self.hover_overlay_center = None;
                     self.preview_handle = None;
+                    self.last_preview_region = None;
+                    self.last_preview_detection_region = None;
+                    self.last_preview_detection_at = None;
                 }
                 Task::none()
             }
@@ -916,6 +821,8 @@ impl ImageViewer {
     fn set_region_size(&mut self, size: u32) {
         let max = self.max_region_size();
         self.region_size = size.clamp(Self::MIN_REGION_SIZE, max);
+        self.last_preview_detection_region = None;
+        self.last_preview_detection_at = None;
         // Refresh preview with new region size
         if let Some(image_point) = self.hover_image_pos {
             self.update_preview(image_point);
@@ -1057,28 +964,27 @@ impl ImageViewer {
     fn update_preview(&mut self, image_point: Point) {
         let Some((start_x, start_y, region_size)) = self.preview_region(image_point) else {
             self.preview_handle = None;
+            self.last_preview_region = None;
             return;
         };
+
+        let region_key = (start_x, start_y, region_size);
+        if self.last_preview_region == Some(region_key) {
+            return;
+        }
+        self.last_preview_region = Some(region_key);
 
         let Some(region_bytes) = self.extract_region_pixels(start_x, start_y, region_size) else {
             self.preview_handle = None;
             return;
         };
 
-        if let Some(buffer) = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(
+        // Use raw pixels at 1:1 for pixel-perfect display
+        self.preview_handle = Some(iced::widget::image::Handle::from_rgba(
             region_size,
             region_size,
             region_bytes,
-        ) {
-            // Use raw pixels at 1:1 for pixel-perfect display
-            self.preview_handle = Some(iced::widget::image::Handle::from_rgba(
-                buffer.width(),
-                buffer.height(),
-                buffer.into_raw(),
-            ));
-        } else {
-            self.preview_handle = None;
-        }
+        ));
     }
 
     fn preview_region(&self, image_point: Point) -> Option<(u32, u32, u32)> {
@@ -1124,6 +1030,7 @@ impl ImageViewer {
 
     fn extract_region_pixels(&self, start_x: u32, start_y: u32, region_size: u32) -> Option<Vec<u8>> {
         let pixels = self.pixels.as_ref()?;
+        let pixels: &[u8] = pixels.as_ref();
         let (width_px, height_px) = self.image_dimensions;
         if width_px == 0 || height_px == 0 || region_size == 0 {
             return None;
@@ -1153,20 +1060,17 @@ impl ImageViewer {
         let region = self.extract_region_pixels(start_x, start_y, region_size)?;
         Some((region, region_size))
     }
+
+    fn current_aoi_region_key(&self) -> Option<(u32, u32, u32)> {
+        let image_point = self.hover_image_pos?;
+        self.preview_region(image_point)
+    }
 }
 
 struct InteractionState {
     dragging: bool,
     drag_origin: Option<Point>,
     drag_start_offset: Vector,
-}
-
-struct ClipParams {
-    src_left: u32,
-    src_top: u32,
-    crop_w: u32,
-    crop_h: u32,
-    dest: Rectangle,
 }
 
 impl Default for InteractionState {
@@ -1198,16 +1102,9 @@ impl<'a> Program<Message> for ImageLayer<'a> {
             frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::from_rgb8(18, 18, 18));
 
             if let Some(handle) = &viewer.image {
-                // Check if we have a pre-computed cropped handle
-                if let Some(cropped) = &viewer.cropped_handle {
-                    // Use cached cropped image
-                    frame.draw_image(
-                        viewer.cropped_dest,
-                        canvas::Image::new(cropped.clone())
-                            .filter_method(iced::widget::image::FilterMethod::Nearest),
-                    );
-                } else {
-                    // No clipping needed - draw full image
+                // Let the renderer handle clipping/scissoring; avoid CPU-side cropping on pan/zoom.
+                let clip = Rectangle::new(Point::ORIGIN, bounds.size());
+                frame.with_clip(clip, |frame| {
                     let scale = viewer.current_scale(bounds.size());
                     let dest_rect = Rectangle::new(
                         Point::new(viewer.offset.x, viewer.offset.y),
@@ -1221,7 +1118,7 @@ impl<'a> Program<Message> for ImageLayer<'a> {
                         canvas::Image::new(handle.clone())
                             .filter_method(iced::widget::image::FilterMethod::Nearest),
                     );
-                }
+                });
             } else {
                 frame.fill_text(canvas::Text {
                     content: "No image loaded".to_string(),
@@ -1259,15 +1156,17 @@ impl<'a> Program<Message> for OverlayLayer<'a> {
     fn update(
         &self,
         state: &mut Self::State,
-        event: canvas::Event,
+        event: &canvas::Event,
         bounds: Rectangle,
         cursor: Cursor,
-    ) -> (event::Status, Option<Message>) {
+    ) -> Option<iced::widget::Action<Message>> {
         let viewer = self.0;
+        let in_bounds = cursor.position_in(bounds).is_some();
+
         match event {
             canvas::Event::Mouse(mouse_event) => match mouse_event {
                 mouse::Event::ButtonPressed(mouse::Button::Left) => {
-                    if cursor.position_in(bounds).is_some() {
+                    if in_bounds {
                         if let Some(global) = cursor.position() {
                             state.dragging = true;
                             state.drag_origin = Some(global);
@@ -1276,20 +1175,30 @@ impl<'a> Program<Message> for OverlayLayer<'a> {
                             state.dragging = false;
                             state.drag_origin = None;
                         }
-                        (event::Status::Captured, None)
+                        Some(iced::widget::Action::capture())
                     } else {
-                        (event::Status::Ignored, None)
+                        None
                     }
                 }
                 mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                    state.dragging = false;
-                    state.drag_origin = None;
-                    (event::Status::Captured, None)
+                    if state.dragging || in_bounds {
+                        state.dragging = false;
+                        state.drag_origin = None;
+                        Some(iced::widget::Action::capture())
+                    } else {
+                        None
+                    }
                 }
-                mouse::Event::ButtonPressed(mouse::Button::Right) => (
-                    event::Status::Captured,
-                    Some(Message::Viewer(ViewerEvent::Reset)),
-                ),
+                mouse::Event::ButtonPressed(mouse::Button::Right) => {
+                    if in_bounds {
+                        Some(
+                            iced::widget::Action::publish(Message::Viewer(ViewerEvent::Reset))
+                                .and_capture(),
+                        )
+                    } else {
+                        None
+                    }
+                }
                 mouse::Event::CursorMoved { .. } => {
                     let viewport_cursor = cursor.position_in(bounds);
 
@@ -1302,85 +1211,84 @@ impl<'a> Program<Message> for OverlayLayer<'a> {
 
                         let new_offset = state.drag_start_offset + displacement;
 
-                        return (
-                            event::Status::Captured,
-                            Some(Message::Viewer(ViewerEvent::Pan {
+                        return Some(
+                            iced::widget::Action::publish(Message::Viewer(ViewerEvent::Pan {
                                 offset: new_offset,
                                 bounds: bounds.size(),
-                            })),
+                            }))
+                            .and_capture(),
                         );
                     }
 
                     if let Some(cursor_pos) = viewport_cursor {
-                        (
-                            event::Status::Captured,
-                            Some(Message::Viewer(ViewerEvent::Hover {
+                        Some(
+                            iced::widget::Action::publish(Message::Viewer(ViewerEvent::Hover {
                                 cursor: cursor_pos,
                                 bounds: bounds.size(),
-                            })),
+                            }))
+                            .and_capture(),
                         )
                     } else {
-                        (
-                            event::Status::Captured,
-                            Some(Message::Viewer(ViewerEvent::Leave)),
-                        )
+                        // Do not capture out-of-bounds movement; otherwise this Canvas can
+                        // starve other widgets (e.g., buttons) from receiving mouse events.
+                        Some(iced::widget::Action::publish(Message::Viewer(ViewerEvent::Leave)))
                     }
                 }
                 mouse::Event::WheelScrolled { delta } => {
+                    if !in_bounds {
+                        return None;
+                    }
+
                     let steps = match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => y,
-                        mouse::ScrollDelta::Pixels { y, .. } => y / 120.0,
+                        mouse::ScrollDelta::Lines { y, .. } => *y,
+                        mouse::ScrollDelta::Pixels { y, .. } => *y / 120.0,
                     };
 
                     if steps.abs() > f32::EPSILON {
                         let factor = if steps > 0.0 { 1.1 } else { 0.9 };
                         let cursor_position = cursor.position_in(bounds).unwrap_or(Point::ORIGIN);
-                        (
-                            event::Status::Captured,
-                            Some(Message::Viewer(ViewerEvent::Zoom {
+                        Some(
+                            iced::widget::Action::publish(Message::Viewer(ViewerEvent::Zoom {
                                 factor,
                                 cursor: cursor_position,
                                 bounds: bounds.size(),
-                            })),
+                            }))
+                            .and_capture(),
                         )
                     } else {
-                        (event::Status::Ignored, None)
+                        None
                     }
                 }
-                mouse::Event::CursorLeft => (
-                    event::Status::Captured,
-                    Some(Message::Viewer(ViewerEvent::Leave)),
-                ),
-                _ => (event::Status::Ignored, None),
+                mouse::Event::CursorLeft => {
+                    Some(iced::widget::Action::publish(Message::Viewer(ViewerEvent::Leave)))
+                }
+                _ => None,
             },
             canvas::Event::Keyboard(key_event) => match key_event {
                 keyboard::Event::KeyPressed { key, .. } => {
                     if matches!(key, keyboard::Key::Named(keyboard::key::Named::Shift)) {
-                        return (
-                            event::Status::Captured,
-                            Some(Message::ShiftChanged(true)),
+                        return Some(
+                            iced::widget::Action::publish(Message::ShiftChanged(true)),
                         );
                     }
                     if matches!(key, keyboard::Key::Named(keyboard::key::Named::CapsLock)) {
-                        return (
-                            event::Status::Captured,
-                            Some(Message::CapsLockTapped),
+                        return Some(
+                            iced::widget::Action::publish(Message::CapsLockTapped),
                         );
                     }
-                    (event::Status::Ignored, None)
+                    None
                 }
                 keyboard::Event::KeyReleased { key, .. } => {
                     if matches!(key, keyboard::Key::Named(keyboard::key::Named::Shift)) {
-                        return (
-                            event::Status::Captured,
-                            Some(Message::ShiftChanged(false)),
+                        return Some(
+                            iced::widget::Action::publish(Message::ShiftChanged(false)),
                         );
                     }
-                    (event::Status::Ignored, None)
+                    None
                 }
-                _ => (event::Status::Ignored, None),
+                _ => None,
             },
-            _ => (event::Status::Ignored, None),
+            _ => None,
         }
     }
 }
@@ -1391,7 +1299,7 @@ async fn load_image_task(path: PathBuf) -> Result<LoadedImage, String> {
         let image = image::open(&original_path).map_err(|err| err.to_string())?;
         let rgba = image.to_rgba8();
         let (width, height) = rgba.dimensions();
-        let pixels = rgba.into_raw();
+        let pixels: Bytes = rgba.into_raw().into();
         let handle = iced::widget::image::Handle::from_rgba(width, height, pixels.clone());
         Ok(LoadedImage {
             handle,
@@ -1413,6 +1321,7 @@ async fn run_detection_task(pixels: Vec<u8>, size: Size) -> Result<DetectionPayl
                 decoded_text: "Empty image".to_string(),
                 origin: None,
                 annotated: None,
+                minified_json: String::new(),
             });
         }
 
@@ -1420,38 +1329,53 @@ async fn run_detection_task(pixels: Vec<u8>, size: Size) -> Result<DetectionPayl
             .ok_or_else(|| "Invalid pixel buffer dimensions".to_string())?;
         let dyn_img = DynamicImage::ImageRgba8(rgba);
 
-        let detection: AnotoDetection =
-            annotate_anoto_dots(&dyn_img, &AnotoConfig::default()).map_err(|e| e.to_string())?;
+        let config = AnotoConfig::default();
+        let components =
+            detect_components_from_image(&dyn_img, &config).map_err(|e| e.to_string())?;
+
+        let (arrow_grid_text, origin) = match detect_grid(&components, &config) {
+            Some((_rows, _cols, grid, origin)) => (grid, origin),
+            None => (String::new(), None),
+        };
 
         let mut decoded_text = String::new();
-        if let Some((x, y)) = detection.origin {
+        if let Some((x, y)) = origin {
             decoded_text.push_str(&format!("Origin: ({:.1}, {:.1})\n\n", x, y));
         } else {
             decoded_text.push_str("Origin: not found\n\n");
         }
 
-        if detection.arrow_grid.is_empty() {
+        if arrow_grid_text.is_empty() {
             decoded_text.push_str("No grid decoded");
         } else {
-            decoded_text.push_str(&detection.arrow_grid);
+            decoded_text.push_str(&arrow_grid_text);
         }
 
-        let annotated_rgba = detection.annotated.to_rgba8();
-        let (ann_w, ann_h) = annotated_rgba.dimensions();
-        let annotated = if ann_w == 0 || ann_h == 0 {
-            None
+        // Preview image: plotters rendering (same style as CLI --plot).
+        let annotated = match render_plot_rgba(width, height, &components, &config) {
+            Ok(buf) if !buf.is_empty() => Some(ImageData {
+                width,
+                height,
+                pixels: buf,
+            }),
+            Ok(_) => None,
+            Err(e) => return Err(e),
+        };
+
+        // Preview JSON: minified arrows derived from the same intersection-grid structure.
+        let full_grid = build_intersection_grid(&components, &config);
+        let minified = minify_from_full_grid(&full_grid);
+        let minified_json = if minified.is_empty() {
+            "[]".to_string()
         } else {
-            Some(ImageData {
-                width: ann_w,
-                height: ann_h,
-                pixels: annotated_rgba.into_raw(),
-            })
+            write_grid_json_string(&minified)
         };
 
         Ok(DetectionPayload {
             decoded_text,
-            origin: detection.origin,
+            origin,
             annotated,
+            minified_json,
         })
     })
     .await

@@ -18,6 +18,8 @@ const CENTRALITY_THRESHOLD: f32 = 0.55;
 const COLOR_GREEN: Rgba<u8> = Rgba([110, 170, 90, 255]);
 const COLOR_ORANGE: Rgba<u8> = Rgba([230, 130, 30, 255]);
 const COLOR_BLUE: Rgba<u8> = Rgba([60, 110, 220, 255]);
+
+type GridDetectionResult = (usize, usize, String, Option<(f32, f32)>);
 const COLOR_MAGENTA: Rgba<u8> = Rgba([210, 70, 210, 255]);
 
 /// Configuration parameters for Anoto dot detection.
@@ -147,15 +149,9 @@ pub fn annotate_anoto_dots(
 
     draw_grid_lines(&mut canvas, &components);
 
-    // No row/col/arrow logic; only per-dot overlays
-    let col_xs: Vec<f32> = Vec::new();
-    let row_ys: Vec<f32> = Vec::new();
-    let arrow_grid = String::new();
-
-    let origin = if let (Some(&x0), Some(&y0)) = (col_xs.first(), row_ys.first()) {
-        Some((x0, y0))
-    } else {
-        None
+    let (arrow_grid, origin) = match detect_grid(&components, config) {
+        Some((_rows, _cols, grid, origin)) => (grid, origin),
+        None => (String::new(), None),
     };
 
     Ok(AnotoDetection {
@@ -373,7 +369,14 @@ fn draw_line(canvas: &mut RgbaImage, start: (f32, f32), end: (f32, f32), thickne
                         let dist_x = point.0 - dot.center.0;
                         let dist_y = point.1 - dot.center.1;
                         let dist = (dist_x * dist_x + dist_y * dist_y).sqrt();
-                        if dist < dot.radius {
+                        let core_radius = dot.radius * 0.5;
+                        // always preserve center core pixels (don't overwrite any center)
+                        if dist < core_radius {
+                            inside_other_dot = true;
+                            break;
+                        }
+                        // if another color dot is here, do not draw through it
+                        if dist < dot.radius && dot.type_color != color {
                             inside_other_dot = true;
                             break;
                         }
@@ -402,7 +405,12 @@ fn draw_line(canvas: &mut RgbaImage, start: (f32, f32), end: (f32, f32), thickne
                         let dist_x = point.0 - dot.center.0;
                         let dist_y = point.1 - dot.center.1;
                         let dist = (dist_x * dist_x + dist_y * dist_y).sqrt();
-                        if dist < dot.radius {
+                        let core_radius = dot.radius * 0.5;
+                        if dist < core_radius {
+                            inside_other_dot = true;
+                            break;
+                        }
+                        if dist < dot.radius && dot.type_color != color {
                             inside_other_dot = true;
                             break;
                         }
@@ -417,31 +425,67 @@ fn draw_line(canvas: &mut RgbaImage, start: (f32, f32), end: (f32, f32), thickne
 }
 
 fn draw_grid_lines(canvas: &mut RgbaImage, dots: &[DotDetection]) {
-    use std::collections::HashMap;
+    // no HashMap needed here
     let global_avg_radius: f32 = dots.iter().map(|d| d.radius).sum::<f32>() / dots.len() as f32;
     let thickness = (global_avg_radius / 4.0).max(1.0);
-    let mut color_groups: HashMap<Rgba<u8>, Vec<&DotDetection>> = HashMap::new();
-    for dot in dots {
-        color_groups.entry(dot.type_color).or_insert(Vec::new()).push(dot);
+
+    // compute rotation like detect_grid
+    let centers: Vec<(f32,f32)> = dots.iter().map(|d| d.center).collect();
+    let mean_x = centers.iter().map(|c| c.0).sum::<f32>() / centers.len() as f32;
+    let mean_y = centers.iter().map(|c| c.1).sum::<f32>() / centers.len() as f32;
+    let mut sxx = 0f32; let mut sxy = 0f32; let mut syy = 0f32;
+    for &(x,y) in &centers { let dx = x - mean_x; let dy = y - mean_y; sxx += dx*dx; sxy += dx*dy; syy += dy*dy; }
+    let n = centers.len() as f32; sxx /= n; sxy /= n; syy /= n;
+    let trace = sxx + syy; let det = sxx*syy - sxy*sxy; let temp = ((trace*trace)/4.0 - det).max(0.0); let lambda = trace/2.0 + temp.sqrt();
+    let vx = lambda - syy; let vy = sxy; let angle = vy.atan2(vx);
+    let cos_a = angle.cos(); let sin_a = angle.sin();
+    let mut rotated: Vec<(f32,f32)> = Vec::new();
+    for &(x,y) in &centers { let dx = x - mean_x; let dy = y - mean_y; let rx = dx * cos_a + dy * sin_a; let ry = -dx * sin_a + dy * cos_a; rotated.push((rx, ry)); }
+    let xs: Vec<f32> = rotated.iter().map(|c| c.0).collect(); let ys: Vec<f32> = rotated.iter().map(|c| c.1).collect();
+    let cols = cluster_positions(&xs); let rows = cluster_positions(&ys);
+    if cols.is_empty() || rows.is_empty() { return; }
+
+    // compute rotated bounds using canvas corners
+    let width = canvas.width() as f32; let height = canvas.height() as f32;
+    let corners = [(0.0f32, 0.0f32), (width, 0.0f32), (0.0f32, height), (width, height)];
+    let mut min_rx = f32::MAX; let mut max_rx = f32::MIN; let mut min_ry = f32::MAX; let mut max_ry = f32::MIN;
+    for &(cx, cy) in corners.iter() {
+        let dx = cx - mean_x; let dy = cy - mean_y; let rx = dx * cos_a + dy * sin_a; let ry = -dx * sin_a + dy * cos_a;
+        if rx < min_rx { min_rx = rx; }
+        if rx > max_rx { max_rx = rx; }
+        if ry < min_ry { min_ry = ry; }
+        if ry > max_ry { max_ry = ry; }
     }
-    for (color, group) in color_groups {
-        if group.is_empty() { continue; }
-        let xs: HashSet<i32> = group.iter().map(|d| d.center.0.round() as i32).collect();
-        let ys: HashSet<i32> = group.iter().map(|d| d.center.1.round() as i32).collect();
-        let is_vertical = xs.len() > ys.len();
-        if is_vertical {
-            for &x in &xs {
-                let start = (x as f32, 0.0);
-                let end = (x as f32, canvas.height() as f32);
-                draw_line(canvas, start, end, thickness, color, dots);
-            }
-        } else {
-            for &y in &ys {
-                let start = (0.0, y as f32);
-                let end = (canvas.width() as f32, y as f32);
-                draw_line(canvas, start, end, thickness, color, dots);
-            }
-        }
+    let cols_full = expand_positions(cols.clone(), min_rx, max_rx);
+    let rows_full = expand_positions(rows.clone(), min_ry, max_ry);
+
+    // Top-down: draw horizontal lines in ascending original Y
+    let mut rows_with_y: Vec<(f32, f32)> = rows_full.iter().map(|&ry| {
+        let orig_y = mean_y + ry * cos_a; (ry, orig_y)
+    }).collect();
+    rows_with_y.sort_by(|a,b| a.1.partial_cmp(&b.1).unwrap());
+    for (ry, _orig_y) in rows_with_y.iter() {
+        // choose color from nearest dot if available
+        let mut best = None::<Rgba<u8>>; let mut best_d = f32::MAX;
+        for d in dots.iter() { let dx = d.center.0 - mean_x; let dy = d.center.1 - mean_y; let rry = -dx * sin_a + dy * cos_a; let delta = (rry - *ry).abs(); if delta < best_d { best_d = delta; best = Some(d.type_color); } }
+        let color = best.unwrap_or(Rgba([200,200,200,255]));
+        let start_rot = (min_rx, *ry); let end_rot = (max_rx, *ry);
+        let start = (mean_x + (start_rot.0 * cos_a - start_rot.1 * sin_a), mean_y + (start_rot.0 * sin_a + start_rot.1 * cos_a));
+        let end = (mean_x + (end_rot.0 * cos_a - end_rot.1 * sin_a), mean_y + (end_rot.0 * sin_a + end_rot.1 * cos_a));
+        draw_line(canvas, start, end, thickness, color, dots);
+    }
+
+    // Left-to-right: draw vertical lines in ascending original X
+    let mut cols_with_x: Vec<(f32, f32)> = cols_full.iter().map(|&rx| { let orig_x = mean_x + rx * cos_a; (rx, orig_x) }).collect();
+    cols_with_x.sort_by(|a,b| a.1.partial_cmp(&b.1).unwrap());
+    for (rx, _orig_x) in cols_with_x.iter() {
+        let mut best = None::<Rgba<u8>>; let mut best_d = f32::MAX;
+        for d in dots.iter() { let dx = d.center.0 - mean_x; let dy = d.center.1 - mean_y; let rrx = dx * cos_a + dy * sin_a; let delta = (rrx - *rx).abs(); if delta < best_d { best_d = delta; best = Some(d.type_color); } }
+        let color = best.unwrap_or(Rgba([200,200,200,255]));
+        let start_rot = (*rx, min_ry); let end_rot = (*rx, max_ry);
+        let start = (mean_x + (start_rot.0 * cos_a - start_rot.1 * sin_a), mean_y + (start_rot.0 * sin_a + start_rot.1 * cos_a));
+        let end = (mean_x + (end_rot.0 * cos_a - end_rot.1 * sin_a), mean_y + (end_rot.0 * sin_a + end_rot.1 * cos_a));
+        draw_line(canvas, start, end, thickness, color, dots);
     }
 }
 
@@ -500,7 +544,7 @@ fn draw_horizontal_line(canvas: &mut RgbaImage, y: f32, color: Rgba<u8>, all_dot
         return;
     }
     for x in 0..width {
-        let point = (x as f32, y as f32);
+        let point = (x as f32, y);
         let mut skip = false;
         for dot in all_dots {
             if should_skip(dot) {
@@ -527,7 +571,7 @@ fn draw_vertical_line(canvas: &mut RgbaImage, x: f32, color: Rgba<u8>, all_dots:
         return;
     }
     for y in 0..height {
-        let point = (x as f32, y as f32);
+        let point = (x, y as f32);
         let mut skip = false;
         for dot in all_dots {
             if should_skip(dot) {
@@ -685,14 +729,14 @@ fn split_large_component(
         let mean_r = sum_r as f32 / cnt as f32; let mean_g = sum_g as f32 / cnt as f32; let mean_b = sum_b as f32 / cnt as f32;
         let dot_color = Rgba([mean_r as u8, mean_g as u8, mean_b as u8, 255]);
         let type_color = classify_color(mean_r, mean_g, mean_b, config);
-        detections.push(DotDetection { center: (cx, cy), radius: radius, dot_color, type_color });
+        detections.push(DotDetection { center: (cx, cy), radius, dot_color, type_color });
     }
 
     detections
 }
 
 /// Attempt to infer grid rows/columns and produce a simple textual representation.
-pub fn detect_grid(dots: &[DotDetection], config: &AnotoConfig) -> Option<(usize, usize, String, Option<(f32, f32)>)> {
+pub fn detect_grid(dots: &[DotDetection], config: &AnotoConfig) -> Option<GridDetectionResult> {
     if dots.is_empty() { return None; }
     // extract centers
     let centers: Vec<(f32,f32)> = dots.iter().map(|d| d.center).collect();
@@ -729,44 +773,64 @@ pub fn detect_grid(dots: &[DotDetection], config: &AnotoConfig) -> Option<(usize
     }
 
     // cluster x and y into unique columns/rows
-    fn cluster_positions(vals: &mut Vec<f32>) -> Vec<f32> {
-        vals.sort_by(|a,b| a.partial_cmp(b).unwrap());
-        // find median spacing
-        let mut diffs = Vec::new();
-        for i in 1..vals.len() { diffs.push(vals[i] - vals[i-1]); }
-        let spacing = if diffs.is_empty() { 1.0 } else {
-            let mut ds = diffs.clone(); ds.sort_by(|a,b| a.partial_cmp(b).unwrap()); ds[ds.len()/2]
-        };
-        let mut clusters: Vec<f32> = Vec::new();
-        if vals.is_empty() { return clusters; }
-        let mut cur = vals[0];
-        for v in vals.iter().skip(1) {
-            if (v - cur).abs() > spacing * 0.6 {
-                clusters.push(cur);
-                cur = *v;
-            } else {
-                // average into cluster center
-                cur = (cur + *v) / 2.0;
-            }
+
+    let xs: Vec<f32> = rotated.iter().map(|c| c.0).collect();
+    let ys: Vec<f32> = rotated.iter().map(|c| c.1).collect();
+    let cols = cluster_positions(&xs);
+    let rows = cluster_positions(&ys);
+
+    // Expand rows/cols to include missing grid positions due to empty rows/columns
+    fn expand_positions(mut centers: Vec<f32>, min_b: f32, max_b: f32) -> Vec<f32> {
+        if centers.is_empty() { return centers; }
+        centers.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        if centers.len() == 1 {
+            return vec![centers[0]];
         }
-        clusters.push(cur);
-        clusters
+        let mut diffs: Vec<f32> = Vec::new();
+        for i in 1..centers.len() { diffs.push((centers[i] - centers[i-1]).abs()); }
+        diffs.sort_by(|a,b| a.partial_cmp(b).unwrap());
+        let spacing = if diffs.is_empty() { 1.0 } else { diffs[diffs.len()/2].max(1e-3) };
+        // align to the first center
+        let first = centers[0];
+        let rel = ((first - min_b) / spacing).round();
+        let start = min_b + rel * spacing;
+        let mut pos = Vec::new();
+        let mut p = start;
+        while p - spacing >= min_b - spacing * 0.5 { p -= spacing; }
+        while p <= max_b + spacing * 0.5 {
+            pos.push(p);
+            p += spacing;
+            if pos.len() > 2000 { break; }
+        }
+        pos
     }
 
-    let mut xs: Vec<f32> = rotated.iter().map(|c| c.0).collect();
-    let mut ys: Vec<f32> = rotated.iter().map(|c| c.1).collect();
-    let cols = cluster_positions(&mut xs);
-    let rows = cluster_positions(&mut ys);
+    // derive rotated bounds based on extremes of the detected dots with padding
+    let min_x = centers.iter().map(|c| c.0).fold(f32::MAX, |a,b| a.min(b));
+    let max_x = centers.iter().map(|c| c.0).fold(f32::MIN, |a,b| a.max(b));
+    let min_y = centers.iter().map(|c| c.1).fold(f32::MAX, |a,b| a.min(b));
+    let max_y = centers.iter().map(|c| c.1).fold(f32::MIN, |a,b| a.max(b));
+    let pad = 10.0_f32;
+    let corners = [(min_x - pad, min_y - pad),(max_x + pad, min_y - pad),(min_x - pad, max_y + pad),(max_x + pad, max_y + pad)];
+    let mut min_rx = f32::MAX; let mut max_rx = f32::MIN; let mut min_ry = f32::MAX; let mut max_ry = f32::MIN;
+    for &(cx, cy) in corners.iter() {
+        let dx = cx - mean_x; let dy = cy - mean_y;
+        let rx = dx * cos_a + dy * sin_a;
+        let ry = -dx * sin_a + dy * cos_a;
+        min_rx = min_rx.min(rx); max_rx = max_rx.max(rx); min_ry = min_ry.min(ry); max_ry = max_ry.max(ry);
+    }
+    let cols_full = expand_positions(cols.clone(), min_rx, max_rx);
+    let rows_full = expand_positions(rows.clone(), min_ry, max_ry);
     if cols.is_empty() || rows.is_empty() { return None; }
 
-    // build grid
-    let mut grid = vec![vec!['.'; cols.len()]; rows.len()];
+    // build grid (use space for empty cells)
+    let mut grid = vec![vec![' '; cols_full.len()]; rows_full.len()];
     for (i, &(rx, ry)) in rotated.iter().enumerate() {
         // find nearest col and row
         let mut best_c = 0usize; let mut best_cd = f32::MAX;
-        for (ci, &cx) in cols.iter().enumerate() { let d = (rx - cx).abs(); if d < best_cd { best_cd = d; best_c = ci; } }
+        for (ci, &cx) in cols_full.iter().enumerate() { let d = (rx - cx).abs(); if d < best_cd { best_cd = d; best_c = ci; } }
         let mut best_r = 0usize; let mut best_rd = f32::MAX;
-        for (ri, &ryv) in rows.iter().enumerate() { let d = (ry - ryv).abs(); if d < best_rd { best_rd = d; best_r = ri; } }
+        for (ri, &ryv) in rows_full.iter().enumerate() { let d = (ry - ryv).abs(); if d < best_rd { best_rd = d; best_r = ri; } }
         // get color char
         let color_ch = color_char_from_type(dots[i].type_color, config);
         grid[best_r][best_c] = color_ch;
@@ -774,17 +838,80 @@ pub fn detect_grid(dots: &[DotDetection], config: &AnotoConfig) -> Option<(usize
 
     // build ASCII grid string
     let mut lines = Vec::new();
-    for r in 0..rows.len() { let line: String = grid[r].iter().collect(); lines.push(line); }
+    for row in grid.iter() { let line: String = row.iter().collect(); lines.push(line); }
     let arrow_grid = lines.join("\n");
     // approximate origin: top-left grid center -> convert to original coordinates
-    let origin = Some((mean_x + cols[0] * cos_a - rows[0] * sin_a, mean_y + cols[0] * sin_a + rows[0] * cos_a));
-    Some((rows.len(), cols.len(), arrow_grid, origin))
+    let origin = Some((mean_x + cols_full[0] * cos_a - rows_full[0] * sin_a, mean_y + cols_full[0] * sin_a + rows_full[0] * cos_a));
+    Some((rows_full.len(), cols_full.len(), arrow_grid, origin))
+}
+
+// Expand positions across bounds using median spacing of centers
+fn expand_positions(mut centers: Vec<f32>, min_b: f32, max_b: f32) -> Vec<f32> {
+    if centers.is_empty() { return centers; }
+    centers.sort_by(|a,b| a.partial_cmp(b).unwrap());
+    if centers.len() == 1 { return vec![centers[0]]; }
+    let mut diffs: Vec<f32> = Vec::new();
+    for i in 1..centers.len() { diffs.push((centers[i] - centers[i-1]).abs()); }
+    diffs.sort_by(|a,b| a.partial_cmp(b).unwrap());
+    let spacing = if diffs.is_empty() { 1.0 } else { diffs[diffs.len()/2].max(1e-3) };
+    let first = centers[0];
+    // Anchor the expanded positions so that the first detected center is included exactly
+    let start = first;
+    let mut pos = Vec::new();
+    let mut p = start;
+    while p - spacing >= min_b - spacing * 0.5 { p -= spacing; }
+    while p <= max_b + spacing * 0.5 {
+        pos.push(p);
+        p += spacing;
+        if pos.len() > 2000 { break; }
+    }
+    pos
+}
+
+// Group nearby positions into cluster centers (median spacing threshold)
+fn cluster_positions(vals: &[f32]) -> Vec<f32> {
+    let mut sorted = vals.to_vec();
+    sorted.sort_by(|a,b| a.partial_cmp(b).unwrap());
+    // find median spacing
+    let mut diffs = Vec::new();
+    for i in 1..vals.len() { diffs.push(vals[i] - vals[i-1]); }
+    let spacing = if diffs.is_empty() { 1.0 } else { let mut ds = diffs.clone(); ds.sort_by(|a,b| a.partial_cmp(b).unwrap()); ds[ds.len()/2] };
+    let mut clusters: Vec<f32> = Vec::new();
+    if vals.is_empty() { return clusters; }
+    let mut cur = vals[0];
+    for v in vals.iter().skip(1) {
+        if (v - cur).abs() > spacing * 0.6 {
+            clusters.push(cur);
+            cur = *v;
+        } else {
+            // average into cluster center
+            cur = (cur + *v) / 2.0;
+        }
+    }
+    clusters.push(cur);
+    clusters
 }
 
 fn color_char_from_type(c: Rgba<u8>, config: &AnotoConfig) -> char {
-    let palette = [config.color_green, config.color_orange, config.color_blue, config.color_magenta];
-    let chars = ['G','O','B','M'];
-    let mut best = 0usize; let mut best_d = color_distance(c, palette[0]);
-    for i in 1..palette.len() { let d = color_distance(c, palette[i]); if d < best_d { best_d = d; best = i; } }
+    // Use the same A1B1 mapping as `testplot`:
+    // orange=↑, magenta=↓, blue=←, green=→
+    let palette = [
+        config.color_orange,
+        config.color_magenta,
+        config.color_blue,
+        config.color_green,
+    ];
+    let chars = ['↑', '↓', '←', '→'];
+    let mut best = 0usize;
+    let mut best_d = color_distance(c, palette[0]);
+
+    for (i, &color) in palette.iter().enumerate().skip(1) {
+        let d = color_distance(c, color);
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+
     chars[best]
 }

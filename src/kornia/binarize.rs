@@ -1,5 +1,3 @@
-use argh::FromArgs;
-use std::path::PathBuf;
 // ...existing code removed for fresh implementation...
 use kornia::io::functional as F;
 use kornia::{
@@ -8,15 +6,6 @@ use kornia::{
 };
 
 type CpuImage<T, const C: usize> = Image<T, C, CpuAllocator>;
-
-#[derive(FromArgs)]
-#[allow(dead_code)]
-/// Binary threshold an image and log it to Rerun
-struct Args {
-    /// path to an input image
-    #[argh(option, short = 'i')]
-    image_path: PathBuf,
-}
 
 #[allow(dead_code)]
 pub fn binarize() -> Result<(), Box<dyn std::error::Error>> {
