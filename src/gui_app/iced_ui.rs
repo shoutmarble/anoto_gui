@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anoto_dot_reader::kornia::anoto::{detect_components_from_image, detect_grid, AnotoConfig};
+use anoto_dot_reader::anoto_decode::decode_all_windows_from_minified_arrows;
 use anoto_dot_reader::minify_arrow_grid::{minify_from_full_grid, write_grid_json_string};
 use anoto_dot_reader::plot_grid::{build_intersection_grid, render_plot_rgba};
 
@@ -40,6 +41,7 @@ struct AnotoApp {
     is_loading: bool,
     panes: pane_grid::State<Pane>,
     decoded_text: String,
+    decoded_editor: text_editor::Content,
     preview_minified_json: String,
     preview_minified_editor: text_editor::Content,
     shift_down: bool,
@@ -57,6 +59,7 @@ enum Message {
     DetectionFinishedPreview(Result<DetectionPayload, String>),
     DetectionFinishedDecode(Result<DetectionPayload, String>),
     PreviewMinifiedEditorAction(text_editor::Action),
+    DecodedEditorAction(text_editor::Action),
     ShiftChanged(bool),
     CapsLockTapped,
 }
@@ -126,6 +129,7 @@ impl AnotoApp {
                 is_loading: false,
                 panes,
                 decoded_text: "Hover to see annotated preview. Hold Shift or toggle Caps Lock to decode.".to_string(),
+                decoded_editor: text_editor::Content::new(),
                 preview_minified_json: String::new(),
                 preview_minified_editor: text_editor::Content::new(),
                 shift_down: false,
@@ -169,6 +173,7 @@ impl AnotoApp {
                 self.is_loading = false;
                 self.decoded_text =
                     "Hover to see annotated preview. Hold Shift or toggle Caps Lock to decode.".to_string();
+                self.decoded_editor = text_editor::Content::new();
                 self.preview_minified_json = String::new();
                 self.preview_minified_editor = text_editor::Content::new();
                 Task::none()
@@ -185,6 +190,7 @@ impl AnotoApp {
                         .set_preview_image(img.width, img.height, img.pixels);
                 }
                 self.decoded_text = payload.decoded_text;
+                self.decoded_editor = text_editor::Content::with_text(&self.decoded_text);
                 self.preview_minified_json = payload.minified_json;
                 self.preview_minified_editor =
                     text_editor::Content::with_text(&self.preview_minified_json);
@@ -192,6 +198,7 @@ impl AnotoApp {
             }
             Message::DetectionFinishedDecode(Err(err)) => {
                 self.decoded_text = format!("Detection failed: {err}");
+                self.decoded_editor = text_editor::Content::with_text(&self.decoded_text);
                 Task::none()
             }
             Message::DetectionFinishedPreview(Ok(payload)) => {
@@ -202,6 +209,10 @@ impl AnotoApp {
                 self.preview_minified_json = payload.minified_json;
                 self.preview_minified_editor =
                     text_editor::Content::with_text(&self.preview_minified_json);
+
+                // Keep the decoded positions panel updated even on preview detection.
+                self.decoded_text = payload.decoded_text;
+                self.decoded_editor = text_editor::Content::with_text(&self.decoded_text);
                 Task::none()
             }
             Message::DetectionFinishedPreview(Err(_)) => Task::none(),
@@ -217,6 +228,14 @@ impl AnotoApp {
                     && let text_editor::Action::Click(_) = action
                 {
                     return iced::clipboard::write(self.preview_minified_json.clone());
+                }
+
+                Task::none()
+            }
+            Message::DecodedEditorAction(action) => {
+                // Read-only textarea: keep selection/cursor/scroll, but prevent edits.
+                if !action.is_edit() {
+                    self.decoded_editor.perform(action);
                 }
 
                 Task::none()
@@ -417,28 +436,7 @@ impl AnotoApp {
                 .into()
         };
 
-        let minified_view: Element<'_, Message> = if self.preview_minified_json.is_empty() {
-            scrollable(
-                container(text("No minified grid available").size(12).font(JETBRAINS_FONT))
-                    .padding(8)
-                    .width(Length::Fill),
-            )
-            .height(Length::Fixed(180.0))
-            .into()
-        } else {
-            // Use a text editor so the JSON can be selected and copied.
-            // Clicking/focusing copies all text to the clipboard.
-            let editor = text_editor(&self.preview_minified_editor)
-                .on_action(Message::PreviewMinifiedEditorAction)
-                .height(Length::Fixed(180.0));
-
-            container(editor)
-                .padding(8)
-                .width(Length::Fill)
-                .into()
-        };
-
-        let preview_content: Element<'_, Message> = column![preview_image, minified_view]
+        let preview_content: Element<'_, Message> = column![preview_image]
             .spacing(10)
             .width(Length::Fill)
             .into();
@@ -456,25 +454,29 @@ impl AnotoApp {
         .spacing(0)
         .into();
 
-        let decoded_text = if self.decoded_text.is_empty() {
-            "No decoded data available"
+        // Anoto pattern (minified JSON) text view
+        let pattern_body: Element<'_, Message> = if self.preview_minified_json.is_empty() {
+            container(text("No anoto pattern available").size(12).font(JETBRAINS_FONT))
+                .padding(8)
+                .width(Length::Fill)
+                .into()
         } else {
-            &self.decoded_text
+            // Read-only textarea so the JSON can be selected and copied.
+            let editor = text_editor(&self.preview_minified_editor)
+                .on_action(Message::PreviewMinifiedEditorAction)
+                .font(JETBRAINS_FONT)
+                .size(10)
+                .height(Length::Fixed(180.0));
+
+            container(editor).padding(8).width(Length::Fill).into()
         };
 
-        let decoded_body = scrollable(
-            container(text(decoded_text).size(12).font(JETBRAINS_FONT))
-                .padding(8)
-                .width(Length::Fill),
-        )
-        .height(Length::Fixed(200.0));
-
-        let decoded_legend: Element<'_, Message> = column![
-            container(text(" Decoded ").size(12).font(JETBRAINS_FONT)).style(|_| container::Style {
+        let pattern_view: Element<'_, Message> = column![
+            container(text(" anoto pattern ").size(12).font(JETBRAINS_FONT)).style(|_| container::Style {
                 background: Some(Color::from_rgb8(32, 32, 32).into()),
                 ..Default::default()
             }),
-            container(decoded_body)
+            container(pattern_body)
                 .padding(0)
                 .width(Length::Fill)
                 .style(legend_style)
@@ -482,12 +484,37 @@ impl AnotoApp {
         .spacing(0)
         .into();
 
-        let layout = column![lock_indicator, preview_legend, decoded_legend]
+        // Decoded (X,Y) positions textarea
+        let decoded_positions_body: Element<'_, Message> = {
+            let editor = text_editor(&self.decoded_editor)
+                .on_action(Message::DecodedEditorAction)
+                .font(JETBRAINS_FONT)
+                .size(10)
+                .height(Length::Fixed(200.0));
+
+            container(editor).padding(8).width(Length::Fill).into()
+        };
+
+        let decoded_positions_view: Element<'_, Message> = column![
+            container(text(" decoded (X,Y) positions ").size(12).font(JETBRAINS_FONT)).style(|_| container::Style {
+                background: Some(Color::from_rgb8(32, 32, 32).into()),
+                ..Default::default()
+            }),
+            container(decoded_positions_body)
+                .padding(0)
+                .width(Length::Fill)
+                .style(legend_style)
+        ]
+        .spacing(0)
+        .into();
+
+        let layout = column![lock_indicator, preview_legend, pattern_view, decoded_positions_view]
             .spacing(16)
             .width(Length::Fill)
             .padding(20);
 
-        container(layout)
+        // Make the whole preview column scrollable.
+        container(scrollable(layout).height(Length::Fill))
             .width(Length::Fill)
             .style(|_| container::Style {
                 background: Some(Color::from_rgb8(32, 32, 32).into()),
@@ -1333,22 +1360,43 @@ async fn run_detection_task(pixels: Vec<u8>, size: Size) -> Result<DetectionPayl
         let components =
             detect_components_from_image(&dyn_img, &config).map_err(|e| e.to_string())?;
 
-        let (arrow_grid_text, origin) = match detect_grid(&components, &config) {
-            Some((_rows, _cols, grid, origin)) => (grid, origin),
-            None => (String::new(), None),
+        let origin = match detect_grid(&components, &config) {
+            Some((_rows, _cols, _grid, origin)) => origin,
+            None => None,
+        };
+
+        // Build preview JSON: minified arrows derived from the intersection-grid structure.
+        // Also decode Anoto page coordinates (x,y) from the minified arrows only.
+        let full_grid = build_intersection_grid(&components, &config);
+        let minified = minify_from_full_grid(&full_grid);
+
+        let minified_json = if minified.is_empty() {
+            "[]".to_string()
+        } else {
+            write_grid_json_string(&minified)
         };
 
         let mut decoded_text = String::new();
-        if let Some((x, y)) = origin {
-            decoded_text.push_str(&format!("Origin: ({:.1}, {:.1})\n\n", x, y));
+        if minified.is_empty() {
+            decoded_text.push_str("No minified arrow pattern to decode");
         } else {
-            decoded_text.push_str("Origin: not found\n\n");
-        }
-
-        if arrow_grid_text.is_empty() {
-            decoded_text.push_str("No grid decoded");
-        } else {
-            decoded_text.push_str(&arrow_grid_text);
+            let decoded = decode_all_windows_from_minified_arrows(&minified);
+            if decoded.is_empty() {
+                decoded_text.push_str(
+                    "No decodable 6x6 window found in minified pattern\n\n(Need at least 6x6 arrows: ↑↓←→, with no blanks)",
+                );
+            } else {
+                decoded_text.push_str(&format!(
+                    "Decoded Anoto page coordinates from minified 6x6 windows: {}\n\n",
+                    decoded.len()
+                ));
+                for d in decoded {
+                    decoded_text.push_str(&format!(
+                        "window ({}, {}) -> (x={}, y={})\n",
+                        d.window_col, d.window_row, d.x, d.y
+                    ));
+                }
+            }
         }
 
         // Preview image: plotters rendering (same style as CLI --plot).
@@ -1360,15 +1408,6 @@ async fn run_detection_task(pixels: Vec<u8>, size: Size) -> Result<DetectionPayl
             }),
             Ok(_) => None,
             Err(e) => return Err(e),
-        };
-
-        // Preview JSON: minified arrows derived from the same intersection-grid structure.
-        let full_grid = build_intersection_grid(&components, &config);
-        let minified = minify_from_full_grid(&full_grid);
-        let minified_json = if minified.is_empty() {
-            "[]".to_string()
-        } else {
-            write_grid_json_string(&minified)
         };
 
         Ok(DetectionPayload {
