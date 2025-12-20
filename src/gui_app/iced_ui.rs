@@ -26,7 +26,7 @@ pub fn run_iced_app() -> iced::Result {
         .theme(AnotoApp::theme)
         .antialiasing(false)
         .window(window::Settings {
-            size: Size::new(640.0, 380.0),
+            size: Size::new(1240.0, 640.0),
             ..Default::default()
         })
         .font(JETBRAINS_FONT_BYTES)
@@ -44,6 +44,7 @@ struct AnotoApp {
     decoded_editor: text_editor::Content,
     preview_minified_json: String,
     preview_minified_editor: text_editor::Content,
+    pattern_font_size: u32,
     shift_down: bool,
     caps_lock: bool,
 }
@@ -56,6 +57,7 @@ enum Message {
     Viewer(ViewerEvent),
     PaneResized(pane_grid::ResizeEvent),
     RegionSizeChanged(u32),
+    PatternFontSizeChanged(u32),
     DetectionFinishedPreview(Result<DetectionPayload, String>),
     DetectionFinishedDecode(Result<DetectionPayload, String>),
     PreviewMinifiedEditorAction(text_editor::Action),
@@ -82,6 +84,7 @@ struct ImageData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pane {
     Viewer,
+    Data,
     Controls,
     Preview,
 }
@@ -114,12 +117,22 @@ impl AnotoApp {
 
     fn new() -> (Self, Task<Message>) {
         let (mut panes, viewer_pane) = pane_grid::State::new(Pane::Viewer);
-        let (controls_pane, _) = panes
-            .split(pane_grid::Axis::Vertical, viewer_pane, Pane::Controls)
-            .expect("failed to create controls pane");
-        panes
-            .split(pane_grid::Axis::Vertical, controls_pane, Pane::Preview)
+        // Layout order (left -> right): Viewer | Preview | Data | Controls
+        let (preview_pane, split_viewer_preview) = panes
+            .split(pane_grid::Axis::Vertical, viewer_pane, Pane::Preview)
             .expect("failed to create preview pane");
+        let (data_pane, split_preview_data) = panes
+            .split(pane_grid::Axis::Vertical, preview_pane, Pane::Data)
+            .expect("failed to create data pane");
+        let (_controls_pane, split_data_controls) = panes
+            .split(pane_grid::Axis::Vertical, data_pane, Pane::Controls)
+            .expect("failed to create controls pane");
+
+        // Initial widths (approx): Viewer 45% | Preview 23% | Data 23% | Controls 9%
+        // Ratio is the fraction given to the *existing* pane in each split.
+        panes.resize(split_viewer_preview, 0.45);
+        panes.resize(split_preview_data, 0.42);
+        panes.resize(split_data_controls, 0.72);
 
         (
             AnotoApp {
@@ -132,6 +145,7 @@ impl AnotoApp {
                 decoded_editor: text_editor::Content::new(),
                 preview_minified_json: String::new(),
                 preview_minified_editor: text_editor::Content::new(),
+                pattern_font_size: 9,
                 shift_down: false,
                 caps_lock: false,
             },
@@ -257,6 +271,10 @@ impl AnotoApp {
                 self.viewer.set_region_size(size);
                 Task::none()
             }
+            Message::PatternFontSizeChanged(size) => {
+                self.pattern_font_size = size;
+                Task::none()
+            }
         }
     }
 
@@ -288,6 +306,7 @@ impl AnotoApp {
             Pane::Viewer => pane_grid::Content::new(self.viewer_section()),
             Pane::Controls => pane_grid::Content::new(self.controls_section()),
             Pane::Preview => pane_grid::Content::new(self.preview_section()),
+            Pane::Data => pane_grid::Content::new(self.data_section()),
         })
         .width(Length::Fill)
         .height(Length::Fill)
@@ -385,7 +404,27 @@ impl AnotoApp {
             .style(legend_style)
             .width(Length::Fill);
 
-        let layout = column![open_button, zoom_box, loaded_box, region_box]
+        let pattern_font_label: Element<'_, Message> =
+            text(format!("Pattern Font: {}", self.pattern_font_size))
+                .size(14)
+                .font(JETBRAINS_FONT)
+                .into();
+
+        let pattern_font_slider: Element<'_, Message> = iced::widget::slider(
+            6u32..=14u32,
+            self.pattern_font_size,
+            Message::PatternFontSizeChanged,
+        )
+        .width(Length::Fill)
+        .into();
+
+        let pattern_font_box =
+            container(column![pattern_font_label, pattern_font_slider].spacing(8))
+                .padding(8)
+                .style(legend_style)
+                .width(Length::Fill);
+
+        let layout = column![open_button, zoom_box, loaded_box, region_box, pattern_font_box]
             .spacing(16)
             .width(Length::Fill)
             .padding(20);
@@ -454,6 +493,31 @@ impl AnotoApp {
         .spacing(0)
         .into();
 
+        let layout = column![lock_indicator, preview_legend]
+            .spacing(16)
+            .width(Length::Fill)
+            .padding(20);
+
+        container(layout)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb8(32, 32, 32).into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn data_section(&self) -> Element<'_, Message> {
+        let legend_style = |_: &_| container::Style {
+            background: None,
+            border: iced::border::Border {
+                color: Color::from_rgb8(100, 100, 100),
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        };
+
         // Anoto pattern (minified JSON) text view
         let pattern_body: Element<'_, Message> = if self.preview_minified_json.is_empty() {
             container(text("No anoto pattern available").size(12).font(JETBRAINS_FONT))
@@ -465,7 +529,7 @@ impl AnotoApp {
             let editor = text_editor(&self.preview_minified_editor)
                 .on_action(Message::PreviewMinifiedEditorAction)
                 .font(JETBRAINS_FONT)
-                .size(10)
+                .size(self.pattern_font_size)
                 .height(Length::Fixed(180.0));
 
             container(editor).padding(8).width(Length::Fill).into()
@@ -508,12 +572,11 @@ impl AnotoApp {
         .spacing(0)
         .into();
 
-        let layout = column![lock_indicator, preview_legend, pattern_view, decoded_positions_view]
+        let layout = column![pattern_view, decoded_positions_view]
             .spacing(16)
             .width(Length::Fill)
             .padding(20);
 
-        // Make the whole preview column scrollable.
         container(scrollable(layout).height(Length::Fill))
             .width(Length::Fill)
             .style(|_| container::Style {
