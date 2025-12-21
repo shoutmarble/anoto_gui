@@ -7,13 +7,18 @@ use iced::{
 };
 use iced_core::Bytes;
 use image::{DynamicImage, RgbaImage};
+use std::error::Error;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use anoto_dot_reader::anoto_decode::{
+    decode_all_windows_from_minified_arrows, extract_best_decodable_window_from_minified_arrows,
+};
 use anoto_dot_reader::kornia::anoto::{detect_components_from_image, detect_grid, AnotoConfig};
-use anoto_dot_reader::anoto_decode::decode_all_windows_from_minified_arrows;
 use anoto_dot_reader::minify_arrow_grid::{minify_from_full_grid, write_grid_json_string};
-use anoto_dot_reader::plot_grid::{build_intersection_grid, render_plot_rgba};
+use anoto_dot_reader::plot_grid::{build_intersection_grid, build_intersection_grid_observed, render_plot_rgba};
 
 const JETBRAINS_FONT_BYTES: &[u8] =
     include_bytes!("../../assets/JetBrainsMono/fonts/ttf/JetBrainsMono-Medium.ttf");
@@ -34,6 +39,123 @@ pub fn run_iced_app() -> iced::Result {
         .run()
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExportKind {
+    Plot,
+    Anoto,
+    Verify,
+}
+
+fn infer_section_from_path(path: &Path) -> Option<(usize, usize, i32, i32)> {
+    let name = path.file_name()?.to_string_lossy();
+    let parts: Vec<&str> = name.split("__").collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let prefix = parts[0];
+    if prefix != "GUI_G" && prefix != "R" {
+        return None;
+    }
+    let w: usize = parts.get(1)?.parse().ok()?;
+    let h: usize = parts.get(2)?.parse().ok()?;
+    let u: i32 = parts.get(3)?.parse().ok()?;
+    let v: i32 = parts.get(4)?.parse().ok()?;
+    Some((w, h, u, v))
+}
+
+fn grid_dims(grid: &[Vec<String>]) -> Option<(usize, usize)> {
+    let h = grid.len();
+    let w = grid.first().map(|r| r.len())?;
+    if w == 0 || !grid.iter().all(|r| r.len() == w) {
+        return None;
+    }
+    Some((h, w))
+}
+
+fn output_base_name(input_path: &Path, minified_json: &str) -> String {
+    if let Some((w, h, u, v)) = infer_section_from_path(input_path) {
+        return format!("R__{w}__{h}__{u}__{v}");
+    }
+
+    let grid: Vec<Vec<String>> = serde_json::from_str(minified_json).unwrap_or_default();
+    if let Some((rows, cols)) = grid_dims(&grid) {
+        return format!("R__{rows}__{cols}__10__10");
+    }
+
+    "R__0__0__10__10".to_string()
+}
+
+fn decode_xy_rows_from_minified_json(minified_json: &str) -> Vec<Vec<[i32; 2]>> {
+    let grid: Vec<Vec<String>> = serde_json::from_str(minified_json).unwrap_or_default();
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut rows = BTreeMap::<i32, BTreeSet<i32>>::new();
+    for d in decode_all_windows_from_minified_arrows(&grid) {
+        rows.entry(d.y).or_default().insert(d.x);
+    }
+    rows.into_iter()
+        .map(|(y, xs)| xs.into_iter().map(|x| [x, y]).collect::<Vec<[i32; 2]>>())
+        .collect()
+}
+
+fn write_verify_rows_compact(path: &Path, rows: &[Vec<[i32; 2]>]) -> Result<(), Box<dyn Error>> {
+    let mut out = String::new();
+    out.push_str("[\n");
+    for (ri, row) in rows.iter().enumerate() {
+        out.push_str("  [");
+        for (ci, [x, y]) in row.iter().copied().enumerate() {
+            if ci > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("[{x},{y}]"));
+        }
+        out.push(']');
+        if ri + 1 < rows.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("]\n");
+    fs::write(path, out)?;
+    Ok(())
+}
+
+async fn export_gui_task(
+    kind: ExportKind,
+    input_path: PathBuf,
+    minified_json: String,
+    annotated: Option<ImageData>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        fs::create_dir_all("READER").map_err(|e| e.to_string())?;
+
+        let base = output_base_name(&input_path, &minified_json);
+        let out_anoto = PathBuf::from("READER").join(format!("{base}__ANOTO.json"));
+        fs::write(&out_anoto, &minified_json).map_err(|e| e.to_string())?;
+
+        match kind {
+            ExportKind::Anoto => Ok(format!("Wrote {}", out_anoto.display())),
+            ExportKind::Plot => {
+                let Some(img) = annotated else {
+                    return Err("No preview plot available".to_string());
+                };
+                let out_plot = PathBuf::from("READER").join(format!("{base}__PLOT.png"));
+                let rgba = RgbaImage::from_raw(img.width, img.height, img.pixels)
+                    .ok_or_else(|| "Invalid preview image buffer".to_string())?;
+                rgba.save(&out_plot).map_err(|e| e.to_string())?;
+                Ok(format!("Wrote {} and {}", out_plot.display(), out_anoto.display()))
+            }
+            ExportKind::Verify => {
+                let out_verify = PathBuf::from("READER").join(format!("{base}__VERIFY.json"));
+                let rows = decode_xy_rows_from_minified_json(&minified_json);
+                write_verify_rows_compact(&out_verify, &rows).map_err(|e| e.to_string())?;
+                Ok(format!("Wrote {} and {}", out_anoto.display(), out_verify.display()))
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 struct AnotoApp {
     viewer: ImageViewer,
     status_text: String,
@@ -44,6 +166,7 @@ struct AnotoApp {
     decoded_editor: text_editor::Content,
     preview_minified_json: String,
     preview_minified_editor: text_editor::Content,
+    last_annotated: Option<ImageData>,
     pattern_font_size: u32,
     shift_down: bool,
     caps_lock: bool,
@@ -60,6 +183,10 @@ enum Message {
     PatternFontSizeChanged(u32),
     DetectionFinishedPreview(Result<DetectionPayload, String>),
     DetectionFinishedDecode(Result<DetectionPayload, String>),
+    ExportPlotPressed,
+    ExportAnotoPressed,
+    ExportVerifyPressed,
+    ExportFinished(Result<String, String>),
     PreviewMinifiedEditorAction(text_editor::Action),
     DecodedEditorAction(text_editor::Action),
     ShiftChanged(bool),
@@ -145,6 +272,7 @@ impl AnotoApp {
                 decoded_editor: text_editor::Content::new(),
                 preview_minified_json: String::new(),
                 preview_minified_editor: text_editor::Content::new(),
+                last_annotated: None,
                 pattern_font_size: 9,
                 shift_down: false,
                 caps_lock: false,
@@ -190,6 +318,7 @@ impl AnotoApp {
                 self.decoded_editor = text_editor::Content::new();
                 self.preview_minified_json = String::new();
                 self.preview_minified_editor = text_editor::Content::new();
+                self.last_annotated = None;
                 Task::none()
             }
             Message::ImageLoaded(Err(error)) => {
@@ -200,8 +329,20 @@ impl AnotoApp {
             Message::DetectionFinishedDecode(Ok(payload)) => {
                 self.viewer.set_detected_origin(payload.origin);
                 if let Some(img) = payload.annotated {
+                    let ImageData {
+                        width,
+                        height,
+                        pixels,
+                    } = img;
                     self.viewer
-                        .set_preview_image(img.width, img.height, img.pixels);
+                        .set_preview_image(width, height, pixels.clone());
+                    self.last_annotated = Some(ImageData {
+                        width,
+                        height,
+                        pixels,
+                    });
+                } else {
+                    self.last_annotated = None;
                 }
                 self.decoded_text = payload.decoded_text;
                 self.decoded_editor = text_editor::Content::with_text(&self.decoded_text);
@@ -217,8 +358,20 @@ impl AnotoApp {
             }
             Message::DetectionFinishedPreview(Ok(payload)) => {
                 if let Some(img) = payload.annotated {
+                    let ImageData {
+                        width,
+                        height,
+                        pixels,
+                    } = img;
                     self.viewer
-                        .set_preview_image(img.width, img.height, img.pixels);
+                        .set_preview_image(width, height, pixels.clone());
+                    self.last_annotated = Some(ImageData {
+                        width,
+                        height,
+                        pixels,
+                    });
+                } else {
+                    self.last_annotated = None;
                 }
                 self.preview_minified_json = payload.minified_json;
                 self.preview_minified_editor =
@@ -230,6 +383,61 @@ impl AnotoApp {
                 Task::none()
             }
             Message::DetectionFinishedPreview(Err(_)) => Task::none(),
+
+            Message::ExportPlotPressed => {
+                let Some(path) = self.last_loaded.clone() else {
+                    self.status_text = "Load an image first".to_string();
+                    return Task::none();
+                };
+                let Some(img) = self.last_annotated.clone() else {
+                    self.status_text = "Hover over the image to generate a preview plot first".to_string();
+                    return Task::none();
+                };
+                if self.preview_minified_json.is_empty() {
+                    self.status_text = "No anoto pattern available to export".to_string();
+                    return Task::none();
+                }
+
+                self.status_text = "Exporting plot...".to_string();
+                let minified_json = self.preview_minified_json.clone();
+                Task::perform(export_gui_task(ExportKind::Plot, path, minified_json, Some(img)), Message::ExportFinished)
+            }
+            Message::ExportAnotoPressed => {
+                let Some(path) = self.last_loaded.clone() else {
+                    self.status_text = "Load an image first".to_string();
+                    return Task::none();
+                };
+                if self.preview_minified_json.is_empty() {
+                    self.status_text = "No anoto pattern available to export".to_string();
+                    return Task::none();
+                }
+
+                self.status_text = "Exporting anoto pattern...".to_string();
+                let minified_json = self.preview_minified_json.clone();
+                Task::perform(export_gui_task(ExportKind::Anoto, path, minified_json, None), Message::ExportFinished)
+            }
+            Message::ExportVerifyPressed => {
+                let Some(path) = self.last_loaded.clone() else {
+                    self.status_text = "Load an image first".to_string();
+                    return Task::none();
+                };
+                if self.preview_minified_json.is_empty() {
+                    self.status_text = "No anoto pattern available to export".to_string();
+                    return Task::none();
+                }
+
+                self.status_text = "Exporting decoded (x,y)...".to_string();
+                let minified_json = self.preview_minified_json.clone();
+                Task::perform(export_gui_task(ExportKind::Verify, path, minified_json, None), Message::ExportFinished)
+            }
+            Message::ExportFinished(Ok(msg)) => {
+                self.status_text = msg;
+                Task::none()
+            }
+            Message::ExportFinished(Err(err)) => {
+                self.status_text = format!("Export failed: {err}");
+                Task::none()
+            }
             Message::PreviewMinifiedEditorAction(action) => {
                 // Keep selection state updated, but prevent editing.
                 if !action.is_edit() {
@@ -424,7 +632,26 @@ impl AnotoApp {
                 .style(legend_style)
                 .width(Length::Fill);
 
-        let layout = column![open_button, zoom_box, loaded_box, region_box, pattern_font_box]
+        let export_plot = button(text("Export Plot").font(JETBRAINS_FONT))
+            .on_press(Message::ExportPlotPressed)
+            .width(Length::Fill);
+        let export_anoto = button(text("Export Anoto Pattern").font(JETBRAINS_FONT))
+            .on_press(Message::ExportAnotoPressed)
+            .width(Length::Fill);
+        let export_verify = button(text("Export Decoded (x,y)").font(JETBRAINS_FONT))
+            .on_press(Message::ExportVerifyPressed)
+            .width(Length::Fill);
+
+        let layout = column![
+            open_button,
+            zoom_box,
+            loaded_box,
+            region_box,
+            pattern_font_box,
+            export_plot,
+            export_anoto,
+            export_verify
+        ]
             .spacing(16)
             .width(Length::Fill)
             .padding(20);
@@ -536,7 +763,7 @@ impl AnotoApp {
         };
 
         let pattern_view: Element<'_, Message> = column![
-            container(text(" anoto pattern ").size(12).font(JETBRAINS_FONT)).style(|_| container::Style {
+            container(text(" Anoto Pattern ").size(12).font(JETBRAINS_FONT)).style(|_| container::Style {
                 background: Some(Color::from_rgb8(32, 32, 32).into()),
                 ..Default::default()
             }),
@@ -1430,37 +1657,67 @@ async fn run_detection_task(pixels: Vec<u8>, size: Size) -> Result<DetectionPayl
 
         // Build preview JSON: minified arrows derived from the intersection-grid structure.
         // Also decode Anoto page coordinates (x,y) from the minified arrows only.
-        let full_grid = build_intersection_grid(&components, &config);
-        let minified = minify_from_full_grid(&full_grid);
+        // We build both variants and pick the one with best arrow coverage.
+        let full_grid_observed = build_intersection_grid_observed(&components, &config);
+        let full_grid_phase = build_intersection_grid(&components, &config);
 
-        let minified_json = if minified.is_empty() {
-            "[]".to_string()
-        } else {
-            write_grid_json_string(&minified)
+        let minified_observed = minify_from_full_grid(&full_grid_observed);
+        let minified_phase = minify_from_full_grid(&full_grid_phase);
+
+        let arrow_count = |g: &[Vec<String>]| {
+            g.iter()
+                .flat_map(|r| r.iter())
+                .filter(|v| matches!(v.as_str(), "↑" | "↓" | "←" | "→"))
+                .count()
         };
 
-        let mut decoded_text = String::new();
-        if minified.is_empty() {
-            decoded_text.push_str("No minified arrow pattern to decode");
+        let mut minified_full = if arrow_count(&minified_phase) >= arrow_count(&minified_observed) {
+            minified_phase
         } else {
-            let decoded = decode_all_windows_from_minified_arrows(&minified);
-            if decoded.is_empty() {
-                decoded_text.push_str(
-                    "No decodable 6x6 window found in minified pattern\n\n(Need at least 6x6 arrows: ↑↓←→, with no blanks)",
-                );
-            } else {
-                decoded_text.push_str(&format!(
-                    "Decoded Anoto page coordinates from minified 6x6 windows: {}\n\n",
-                    decoded.len()
-                ));
-                for d in decoded {
-                    decoded_text.push_str(&format!(
-                        "window ({}, {}) -> (x={}, y={})\n",
-                        d.window_col, d.window_row, d.x, d.y
-                    ));
-                }
-            }
+            minified_observed
+        };
+
+        // GUI uses the same default as CLI: crop to a best 8x8 window.
+        if let Some(window) = extract_best_decodable_window_from_minified_arrows(&minified_full, 8, 8) {
+            minified_full = window;
         }
+
+        let minified_json = if minified_full.is_empty() {
+            "[]".to_string()
+        } else {
+            write_grid_json_string(&minified_full)
+        };
+
+        // Decoded (x,y) panel: show compact JSON rows, same shape as CLI VERIFY.json.
+        let decoded_text = if minified_full.is_empty() {
+            "[]\n".to_string()
+        } else {
+            use std::collections::{BTreeMap, BTreeSet};
+            let mut rows = BTreeMap::<i32, BTreeSet<i32>>::new();
+            for d in decode_all_windows_from_minified_arrows(&minified_full) {
+                rows.entry(d.y).or_default().insert(d.x);
+            }
+
+            let mut out = String::new();
+            out.push_str("[\n");
+            let total_rows = rows.len();
+            for (ri, (y, xs)) in rows.into_iter().enumerate() {
+                out.push_str("  [");
+                for (ci, x) in xs.into_iter().enumerate() {
+                    if ci > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&format!("[{x},{y}]"));
+                }
+                out.push(']');
+                if ri + 1 < total_rows {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str("]\n");
+            out
+        };
 
         // Preview image: plotters rendering (same style as CLI --plot).
         let annotated = match render_plot_rgba(width, height, &components, &config) {

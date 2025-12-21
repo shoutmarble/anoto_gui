@@ -1,6 +1,6 @@
 [package]
 name = "anoto_dot_reader"
-version = "0.4.8"
+version = "0.5.0"
 edition = "2024"
 autobins = false
 default-run = "reader_gui"
@@ -12,6 +12,10 @@ path = "src/bin/gui.rs"
 [[bin]]
 name = "reader_cli"
 path = "src/bin/anoto.rs"
+
+[[bin]]
+name = "match_expected"
+path = "src/bin/match_expected.rs"
 
 [dependencies]
 clap = { version = "4.5.53", features = ["derive"] }

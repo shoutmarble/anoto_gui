@@ -893,13 +893,13 @@ fn cluster_positions(vals: &[f32]) -> Vec<f32> {
 }
 
 fn color_char_from_type(c: Rgba<u8>, config: &AnotoConfig) -> char {
-    // Use the same A1B1 mapping as `testplot`:
-    // orange=↑, magenta=↓, blue=←, green=→
+    // Canonical mapping used by the decoder / expected minified grids:
+    // green=↑, orange=↓, blue=←, magenta=→
     let palette = [
-        config.color_orange,
-        config.color_magenta,
-        config.color_blue,
         config.color_green,
+        config.color_orange,
+        config.color_blue,
+        config.color_magenta,
     ];
     let chars = ['↑', '↓', '←', '→'];
     let mut best = 0usize;

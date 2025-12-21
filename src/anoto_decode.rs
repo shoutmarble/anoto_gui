@@ -70,6 +70,63 @@ pub fn decode_all_windows_from_minified_arrows(minified: &[Vec<String>]) -> Vec<
     out
 }
 
+pub fn extract_best_decodable_window_from_minified_arrows(
+    minified: &[Vec<String>],
+    target_rows: usize,
+    target_cols: usize,
+) -> Option<Vec<Vec<String>>> {
+    if target_rows == 0 || target_cols == 0 {
+        return None;
+    }
+    if minified.is_empty() || minified[0].is_empty() {
+        return None;
+    }
+
+    let h = minified.len();
+    let w = minified[0].len();
+    if !minified.iter().all(|r| r.len() == w) {
+        return None;
+    }
+    if h < target_rows || w < target_cols {
+        return None;
+    }
+
+    let max_possible = if target_rows >= 6 && target_cols >= 6 {
+        (target_rows - 5) * (target_cols - 5)
+    } else {
+        0
+    };
+
+    let mut best_score = 0usize;
+    let mut best_window: Option<Vec<Vec<String>>> = None;
+
+    for top in 0..=(h - target_rows) {
+        for left in 0..=(w - target_cols) {
+            let window: Vec<Vec<String>> = minified
+                .iter()
+                .take(top + target_rows)
+                .skip(top)
+                .map(|row| row[left..(left + target_cols)].to_vec())
+                .collect();
+
+            let score = decode_all_windows_from_minified_arrows(&window).len();
+            if score > best_score {
+                best_score = score;
+                best_window = Some(window);
+                if best_score == max_possible && best_score > 0 {
+                    return best_window;
+                }
+            }
+        }
+    }
+
+    if best_score > 0 {
+        best_window
+    } else {
+        None
+    }
+}
+
 fn patch_from_arrows(
     grid: &[Vec<String>],
     row0: usize,
