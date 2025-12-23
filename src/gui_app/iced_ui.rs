@@ -1,6 +1,6 @@
 use iced::mouse::Cursor;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Program, Stroke};
-use iced::widget::{button, column, container, pane_grid, stack, text, scrollable, text_editor};
+use iced::widget::{button, checkbox, column, container, pane_grid, row, stack, text, scrollable, text_editor, text_input};
 use iced::{
     keyboard, mouse, window, Color, Element, Font, Length, Point, Rectangle, Size, Subscription,
     Task, Theme, Vector,
@@ -170,6 +170,11 @@ struct AnotoApp {
     pattern_font_size: u32,
     shift_down: bool,
     caps_lock: bool,
+    auto_post_enabled: bool,
+    server_port: u16,
+    server_port_input: String,
+    last_posted_minified_json: Option<String>,
+    last_post_attempt_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +196,9 @@ enum Message {
     DecodedEditorAction(text_editor::Action),
     ShiftChanged(bool),
     CapsLockTapped,
+    AutoPostToggled(bool),
+    ServerPortChanged(String),
+    PostFinished(Result<String, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +246,23 @@ struct LoadedImage {
 }
 
 impl AnotoApp {
+    const AUTO_POST_MIN_INTERVAL: Duration = Duration::from_millis(750);
+
+    fn decoded_has_positions(decoded_text: &str) -> bool {
+        let trimmed = decoded_text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let rows: Vec<Vec<[i32; 2]>> = serde_json::from_str(trimmed).unwrap_or_default();
+        rows.iter().any(|r| !r.is_empty())
+    }
+
+    fn can_attempt_post_now(&self) -> bool {
+        self.last_post_attempt_at
+            .is_none_or(|t| t.elapsed() >= Self::AUTO_POST_MIN_INTERVAL)
+    }
+
     fn title(&self) -> String {
         "Anoto Dot Reader".to_string()
     }
@@ -276,6 +301,11 @@ impl AnotoApp {
                 pattern_font_size: 9,
                 shift_down: false,
                 caps_lock: false,
+                auto_post_enabled: false,
+                server_port: 8080,
+                server_port_input: "8080".to_string(),
+                last_posted_minified_json: None,
+                last_post_attempt_at: None,
             },
             Task::none(),
         )
@@ -349,6 +379,24 @@ impl AnotoApp {
                 self.preview_minified_json = payload.minified_json;
                 self.preview_minified_editor =
                     text_editor::Content::with_text(&self.preview_minified_json);
+
+                let should_post = self.auto_post_enabled
+                    && !self.preview_minified_json.trim().is_empty()
+                    && self.preview_minified_json.trim() != "[]"
+                    && Self::decoded_has_positions(&self.decoded_text)
+                    && self.can_attempt_post_now()
+                    && self
+                        .last_posted_minified_json
+                        .as_deref()
+                        .is_none_or(|prev| prev != self.preview_minified_json);
+
+                if should_post {
+                    self.last_post_attempt_at = Some(Instant::now());
+                    let minified_json = self.preview_minified_json.clone();
+                    let port = self.server_port;
+                    return Task::perform(post_to_server(minified_json, port), Message::PostFinished);
+                }
+
                 Task::none()
             }
             Message::DetectionFinishedDecode(Err(err)) => {
@@ -380,6 +428,24 @@ impl AnotoApp {
                 // Keep the decoded positions panel updated even on preview detection.
                 self.decoded_text = payload.decoded_text;
                 self.decoded_editor = text_editor::Content::with_text(&self.decoded_text);
+
+                let should_post = self.auto_post_enabled
+                    && !self.preview_minified_json.trim().is_empty()
+                    && self.preview_minified_json.trim() != "[]"
+                    && Self::decoded_has_positions(&self.decoded_text)
+                    && self.can_attempt_post_now()
+                    && self
+                        .last_posted_minified_json
+                        .as_deref()
+                        .is_none_or(|prev| prev != self.preview_minified_json);
+
+                if should_post {
+                    self.last_post_attempt_at = Some(Instant::now());
+                    let minified_json = self.preview_minified_json.clone();
+                    let port = self.server_port;
+                    return Task::perform(post_to_server(minified_json, port), Message::PostFinished);
+                }
+
                 Task::none()
             }
             Message::DetectionFinishedPreview(Err(_)) => Task::none(),
@@ -481,6 +547,36 @@ impl AnotoApp {
             }
             Message::PatternFontSizeChanged(size) => {
                 self.pattern_font_size = size;
+                Task::none()
+            }
+            Message::AutoPostToggled(enabled) => {
+                self.auto_post_enabled = enabled;
+                if enabled {
+                    self.status_text = format!("Auto-POST enabled to localhost:{}", self.server_port);
+                } else {
+                    self.status_text = "Auto-POST disabled".to_string();
+                }
+                Task::none()
+            }
+            Message::ServerPortChanged(port_str) => {
+                self.server_port_input = port_str.clone();
+                if let Ok(port) = port_str.trim().parse::<u16>() {
+                    self.server_port = port;
+                    if self.auto_post_enabled {
+                        self.status_text = format!("Server port updated to {}", port);
+                    }
+                }
+                Task::none()
+            }
+            Message::PostFinished(Ok(msg)) => {
+                self.status_text = msg;
+                if !self.preview_minified_json.trim().is_empty() && self.preview_minified_json.trim() != "[]" {
+                    self.last_posted_minified_json = Some(self.preview_minified_json.clone());
+                }
+                Task::none()
+            }
+            Message::PostFinished(Err(err)) => {
+                self.status_text = format!("POST failed: {err}");
                 Task::none()
             }
         }
@@ -746,6 +842,30 @@ impl AnotoApp {
         };
 
         // Anoto pattern (minified JSON) text view
+        let auto_post_row: Element<'_, Message> = {
+            let url = format!("http://localhost:{}/decode", self.server_port);
+
+            let toggle = checkbox(self.auto_post_enabled)
+                .label("Auto POST")
+                .on_toggle(Message::AutoPostToggled)
+                .size(14)
+                .font(JETBRAINS_FONT);
+
+            let port_input = text_input("8080", &self.server_port_input)
+                .on_input(Message::ServerPortChanged)
+                .size(14)
+                .font(JETBRAINS_FONT)
+                .width(Length::Fixed(80.0));
+
+            let port_label = text("Port:").size(12).font(JETBRAINS_FONT);
+            let url_label = text(url).size(12).font(JETBRAINS_FONT);
+
+            row![toggle, port_label, port_input, url_label]
+                .spacing(10)
+                .align_y(iced::Alignment::Center)
+                .into()
+        };
+
         let pattern_body: Element<'_, Message> = if self.preview_minified_json.is_empty() {
             container(text("No anoto pattern available").size(12).font(JETBRAINS_FONT))
                 .padding(8)
@@ -767,6 +887,10 @@ impl AnotoApp {
                 background: Some(Color::from_rgb8(32, 32, 32).into()),
                 ..Default::default()
             }),
+            container(auto_post_row)
+                .padding(8)
+                .width(Length::Fill)
+                .style(legend_style),
             container(pattern_body)
                 .padding(0)
                 .width(Length::Fill)
@@ -1627,6 +1751,26 @@ async fn load_image_task(path: PathBuf) -> Result<LoadedImage, String> {
     })
     .await
     .map_err(|err| err.to_string())?
+}
+
+async fn post_to_server(minified_json: String, port: u16) -> Result<String, String> {
+    let url = format!("http://localhost:{}/decode", port);
+    
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(minified_json)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to POST to {}: {}", url, e))?;
+    
+    let status = response.status();
+    if status.is_success() {
+        Ok(format!("Posted to {} (status: {})", url, status))
+    } else {
+        Err(format!("Server returned error: {}", status))
+    }
 }
 
 async fn run_detection_task(pixels: Vec<u8>, size: Size) -> Result<DetectionPayload, String> {
