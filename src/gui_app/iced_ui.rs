@@ -7,6 +7,7 @@ use iced::{
 };
 use iced_core::Bytes;
 use image::{DynamicImage, RgbaImage};
+use reqwest::Client;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -175,6 +176,8 @@ struct AnotoApp {
     server_port_input: String,
     last_posted_minified_json: Option<String>,
     last_post_attempt_at: Option<Instant>,
+    post_in_flight: bool,
+    http_client: Client,
 }
 
 #[derive(Debug, Clone)]
@@ -198,7 +201,10 @@ enum Message {
     CapsLockTapped,
     AutoPostToggled(bool),
     ServerPortChanged(String),
-    PostFinished(Result<String, String>),
+    PostFinished {
+        result: Result<String, String>,
+        posted_json: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +312,8 @@ impl AnotoApp {
                 server_port_input: "8080".to_string(),
                 last_posted_minified_json: None,
                 last_post_attempt_at: None,
+                post_in_flight: false,
+                http_client: Client::new(),
             },
             Task::none(),
         )
@@ -385,6 +393,7 @@ impl AnotoApp {
                     && self.preview_minified_json.trim() != "[]"
                     && Self::decoded_has_positions(&self.decoded_text)
                     && self.can_attempt_post_now()
+                    && !self.post_in_flight
                     && self
                         .last_posted_minified_json
                         .as_deref()
@@ -392,9 +401,17 @@ impl AnotoApp {
 
                 if should_post {
                     self.last_post_attempt_at = Some(Instant::now());
+                    self.post_in_flight = true;
+                    let client = self.http_client.clone();
                     let minified_json = self.preview_minified_json.clone();
                     let port = self.server_port;
-                    return Task::perform(post_to_server(minified_json, port), Message::PostFinished);
+                    let json_for_future = minified_json.clone();
+                    return Task::perform(post_to_server(client, json_for_future, port), move |result| {
+                        Message::PostFinished {
+                            result,
+                            posted_json: minified_json,
+                        }
+                    });
                 }
 
                 Task::none()
@@ -434,6 +451,7 @@ impl AnotoApp {
                     && self.preview_minified_json.trim() != "[]"
                     && Self::decoded_has_positions(&self.decoded_text)
                     && self.can_attempt_post_now()
+                    && !self.post_in_flight
                     && self
                         .last_posted_minified_json
                         .as_deref()
@@ -441,9 +459,17 @@ impl AnotoApp {
 
                 if should_post {
                     self.last_post_attempt_at = Some(Instant::now());
+                    self.post_in_flight = true;
+                    let client = self.http_client.clone();
                     let minified_json = self.preview_minified_json.clone();
                     let port = self.server_port;
-                    return Task::perform(post_to_server(minified_json, port), Message::PostFinished);
+                    let json_for_future = minified_json.clone();
+                    return Task::perform(post_to_server(client, json_for_future, port), move |result| {
+                        Message::PostFinished {
+                            result,
+                            posted_json: minified_json,
+                        }
+                    });
                 }
 
                 Task::none()
@@ -565,18 +591,24 @@ impl AnotoApp {
                     if self.auto_post_enabled {
                         self.status_text = format!("Server port updated to {}", port);
                     }
+                } else if self.auto_post_enabled && !port_str.trim().is_empty() {
+                    self.status_text = "Invalid port (1-65535)".to_string();
                 }
                 Task::none()
             }
-            Message::PostFinished(Ok(msg)) => {
-                self.status_text = msg;
-                if !self.preview_minified_json.trim().is_empty() && self.preview_minified_json.trim() != "[]" {
-                    self.last_posted_minified_json = Some(self.preview_minified_json.clone());
+            Message::PostFinished { result, posted_json } => {
+                self.post_in_flight = false;
+                match result {
+                    Ok(msg) => {
+                        self.status_text = msg;
+                        if !posted_json.trim().is_empty() && posted_json.trim() != "[]" {
+                            self.last_posted_minified_json = Some(posted_json);
+                        }
+                    }
+                    Err(err) => {
+                        self.status_text = format!("POST failed: {err}");
+                    }
                 }
-                Task::none()
-            }
-            Message::PostFinished(Err(err)) => {
-                self.status_text = format!("POST failed: {err}");
                 Task::none()
             }
         }
@@ -1753,23 +1785,39 @@ async fn load_image_task(path: PathBuf) -> Result<LoadedImage, String> {
     .map_err(|err| err.to_string())?
 }
 
-async fn post_to_server(minified_json: String, port: u16) -> Result<String, String> {
+async fn post_to_server(client: Client, minified_json: String, port: u16) -> Result<String, String> {
+    fn body_snippet(s: &str) -> String {
+        const MAX: usize = 2048;
+        if s.len() <= MAX {
+            return s.to_string();
+        }
+        format!("{}...", &s[..MAX])
+    }
+
     let url = format!("http://localhost:{}/decode", port);
-    
-    let client = reqwest::Client::new();
+
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
+        .timeout(Duration::from_secs(2))
         .body(minified_json)
         .send()
         .await
         .map_err(|e| format!("Failed to POST to {}: {}", url, e))?;
-    
+
     let status = response.status();
     if status.is_success() {
         Ok(format!("Posted to {} (status: {})", url, status))
     } else {
-        Err(format!("Server returned error: {}", status))
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response body>".to_string());
+        Err(format!(
+            "Server returned error: {} ({})",
+            status,
+            body_snippet(body.trim())
+        ))
     }
 }
 

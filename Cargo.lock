@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "anoto_dot_reader"
-version = "0.5.0"
+version = "0.5.4"
 dependencies = [
  "bytesize",
  "clap 4.5.53",
